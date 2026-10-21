@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VPH Chat Assistant</title>
+  <!-- ?v= là dấu phiên bản chống bộ nhớ đệm trình duyệt: đổi giao diện mà quên
+       đổi số này thì khách vẫn thấy bản cũ. Sửa giao diện là tăng số này. -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500&family=Be+Vietnam+Pro:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="widget.css?v=20261014">
+</head>
+<body>
+  <div id="chat-widget">
+    <!-- Header -->
+    <header class="chat-header">
+      <div class="header-info">
+        <div class="status-indicator online"></div>
+        <div>
+          <h3 id="merchant-name">Trợ lý Cửa hàng</h3>
+          <span id="operator-status" class="subtext">Trợ lý ảo tự động</span>
+        </div>
+      </div>
+      <!--
+        Khách tự xoá lịch sử chat của mình (quyền của chủ thể dữ liệu — Nghị
+        định 13/2023). Đặt cạnh nút đóng, dùng biểu tượng thùng rác cho gọn.
+
+        BỌC HAI NÚT TRONG MỘT KHỐI: header dùng `justify-content: space-between`,
+        nên khi ba phần tử con đứng rời nhau thì thùng rác bị đẩy ra GIỮA header
+        (lỗi anh Sỹ báo ngày 06/08/2026). Gom vào `.header-actions` để cặp nút
+        luôn dính nhau ở mép phải.
+      -->
+      <div class="header-actions">
+        <button id="xoa-lich-su-btn" class="close-btn icon-btn" title="Xoá lịch sử trò chuyện"
+                aria-label="Xoá lịch sử trò chuyện">🗑</button>
+        <button id="close-btn" class="close-btn" title="Đóng cửa sổ trò chuyện"
+                aria-label="Đóng cửa sổ trò chuyện">&times;</button>
+      </div>
+    </header>
+
+    <!-- Message Logs -->
+    <!-- Lời chào được widget.js dựng theo ngôn ngữ của trang (vi/en), không ghi cứng ở đây. -->
+    <main id="chat-messages" class="chat-logs"></main>
+
+    <!-- Typing Loader -->
+    <div id="typing-indicator" class="typing-indicator">
+      <span></span><span></span><span></span>
+    </div>
+
+    <!-- Input Footer -->
+    <footer class="chat-footer">
+      <form id="chat-form">
+        <input type="text" id="chat-input" placeholder="Nhập câu hỏi của bạn..." autocomplete="off" required>
+        <button type="submit" id="send-btn">
+          <svg viewBox="0 0 24 24">
+            <path d="M2.01 21L23 12 2.01 3 2 10l15 2-15 2z"/>
+          </svg>
+        </button>
+      </form>
+    </footer>
+  </div>
+
+  <script src="widget.js?v=20261016"></script>
+</body>
+</html>

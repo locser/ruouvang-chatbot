@@ -1,0 +1,11 @@
+.env
+.env.*
+node_modules
+dist
+logs
+Test
+_backup_truoc_khi_fix_*
+_to_delete*
+*.log
+.git
+.gitignore

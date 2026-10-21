@@ -1,0 +1,1136 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>VPH Operator Console</title>
+  <!-- Telegram WebApp SDK -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+  <style>
+    /*
+      Bảng màu.
+
+      Giá trị mặc định là chủ đề sáng; script sẽ ghi đè bằng themeParams của
+      Telegram khi mở trong app. Nhân viên dùng Telegram nền tối mà giao diện
+      cứ trắng thì vừa chói vừa lạc lõng — và họ trực chat cả ngày.
+
+      `--tg-*` là biến do chính Telegram bơm vào, có sẵn kể cả trước khi script
+      chạy, nên dùng làm giá trị ưu tiên ngay tại đây.
+    */
+    :root {
+      --primary-color:   var(--tg-theme-button-color, #2481cc);
+      --bg-color:        var(--tg-theme-secondary-bg-color, #efeff4);
+      --text-color:      var(--tg-theme-text-color, #1c1c1e);
+      --card-bg:         var(--tg-theme-bg-color, #ffffff);
+      --bubble-customer: var(--tg-theme-secondary-bg-color, #e5e5ea);
+      --bubble-bot:      var(--tg-theme-button-color, #2481cc);
+      --text-muted:      var(--tg-theme-hint-color, #8e8e93);
+      --border-color:    #d1d1d6;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+
+    /*
+      CHIỀU CAO KHUNG NHÌN — chỗ này từng làm giao diện nhảy loạn khi bật bàn phím.
+      Hai lỗi chồng nhau:
+
+      1. `--tg-viewport-height` được CSS dùng nhưng KHÔNG CÓ GÌ GÁN GIÁ TRỊ. Hàm
+         cập nhật nằm trong `app.js` — file chưa bao giờ được nạp. Biến luôn rỗng
+         nên rơi về `100vh`, mà `100vh` trên di động tính cả phần bị bàn phím che.
+
+      2. `min-height` dùng chiều cao ỔN ĐỊNH (không co khi bàn phím lên) trong khi
+         `height` dùng chiều cao THỰC (có co). `min-height` luôn thắng → thân trang
+         giữ nguyên độ cao → ô nhập bị đẩy xuống dưới bàn phím → trình duyệt tự
+         cuộn để lộ nó → giật nảy mỗi lần gõ.
+
+      Nay chỉ còn MỘT nguồn sự thật là `--khung-nhin`, do script gán lại mỗi lần
+      Telegram báo `viewportChanged`, và CHỈ gán khi thật sự ở trong Telegram.
+      Ngoài Telegram thì không gán gì, để `100dvh` lo (dvh đã trừ sẵn phần bàn
+      phím, khác hẳn vh).
+    */
+    html, body {
+      background-color: var(--bg-color);
+      color: var(--text-color);
+      display: flex;
+      flex-direction: column;
+      height: 100vh;   /* dự phòng cho trình duyệt quá cũ */
+      height: 100dvh;  /* trình duyệt thường: tự trừ bàn phím, không cần JS */
+      /*
+        Dùng biến RIÊNG `--khung-nhin`, KHÔNG dùng `--tg-viewport-height`.
+        Chính telegram-web-app.js cũng gán biến đó, và khi mở ngoài Telegram nó
+        gán bằng `100vh` — đúng đơn vị gây lỗi mà ta đang tránh. Biến riêng thì
+        chỉ mã của ta ghi, và chỉ ghi khi thật sự ở trong Telegram.
+      */
+      height: var(--khung-nhin, 100dvh);
+      width: 100%;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      /* Chặn iOS kéo giãn cả trang khi cuộn tới đầu/cuối danh sách. */
+      overscroll-behavior: none;
+    }
+
+    /* Header styling */
+    header {
+      background-color: var(--primary-color);
+      color: white;
+      padding: 14px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      box-shadow: 0 2px 4px rgba(0,0,0,0.08);
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+
+    header h1 {
+      font-size: 16px;
+      font-weight: 600;
+    }
+
+    /* Toggle bar */
+    .filter-bar {
+      background-color: var(--card-bg);
+      padding: 10px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .filter-bar span {
+      font-size: 13.5px;
+      font-weight: 500;
+      color: var(--text-color);
+    }
+
+    /* Switch styling */
+    .switch {
+      position: relative;
+      display: inline-block;
+      width: 48px;
+      height: 24px;
+    }
+
+    .switch input {
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .slider {
+      position: absolute;
+      cursor: pointer;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-color: #ccc;
+      transition: .3s;
+      border-radius: 24px;
+    }
+
+    .slider:before {
+      position: absolute;
+      content: "";
+      height: 18px;
+      width: 18px;
+      left: 3px;
+      bottom: 3px;
+      background-color: white;
+      transition: .3s;
+      border-radius: 50%;
+    }
+
+    input:checked + .slider {
+      background-color: var(--primary-color);
+    }
+
+    input:checked + .slider:before {
+      transform: translateX(24px);
+    }
+
+    /* Main layouts */
+    .main-container {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* Chat List view */
+    #chat-list-view {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    .chat-card {
+      background-color: var(--card-bg);
+      border-radius: 10px;
+      padding: 12px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+      border: 1px solid var(--border-color);
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      transition: background-color 0.15s;
+    }
+
+    .chat-card:active {
+      background-color: rgba(0,0,0,0.05);
+    }
+
+    .chat-card-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+
+    .visitor-id {
+      font-weight: 600;
+      font-size: 14.5px;
+    }
+
+    .chat-time {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+
+    .chat-card-body {
+      font-size: 13px;
+      color: #555555;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .badge {
+      display: inline-block;
+      padding: 3px 6px;
+      font-size: 10px;
+      font-weight: 600;
+      border-radius: 4px;
+    }
+
+    .badge-bot {
+      background-color: rgba(36, 129, 204, 0.1);
+      color: #2481cc;
+    }
+
+    .badge-waiting {
+      background-color: rgba(245, 158, 11, 0.1);
+      color: #f59e0b;
+    }
+
+    .badge-human {
+      background-color: rgba(239, 68, 68, 0.1);
+      color: #ef4444;
+    }
+
+    /* Chat Detail view */
+    #chat-detail-view {
+      position: absolute;
+      top: 0;
+      left: 100%;
+      width: 100%;
+      height: 100%;
+      background-color: var(--bg-color);
+      display: flex;
+      flex-direction: column;
+      transition: left 0.3s cubic-bezier(0.1, 0.76, 0.55, 0.94);
+      z-index: 200;
+    }
+
+    #chat-detail-view.active {
+      left: 0;
+    }
+
+    .detail-header {
+      background-color: var(--card-bg);
+      border-bottom: 1px solid var(--border-color);
+      padding: 10px 16px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .back-btn {
+      background: none;
+      border: none;
+      font-size: 22px;
+      cursor: pointer;
+      color: var(--primary-color);
+      padding-right: 6px;
+    }
+
+    .detail-title {
+      flex: 1;
+      font-weight: 600;
+      font-size: 14.5px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .takeover-btn {
+      background-color: #10b981;
+      color: white;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 6px;
+      font-size: 12.5px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .messages-container {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      background-color: #f4f4f7;
+    }
+
+    .bubble {
+      padding: 8px 12px;
+      border-radius: 12px;
+      max-width: 80%;
+      font-size: 13.5px;
+      line-height: 1.4;
+      position: relative;
+    }
+
+    .bubble-customer {
+      align-self: flex-start;
+      background-color: var(--card-bg);
+      color: var(--text-color);
+      border-radius: 12px 12px 12px 0;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }
+
+    .bubble-bot {
+      align-self: flex-end;
+      background-color: var(--bubble-bot);
+      color: white;
+      border-radius: 12px 12px 0 12px;
+      box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    }
+
+    .bubble-time {
+      font-size: 9px;
+      margin-top: 4px;
+      text-align: right;
+      opacity: 0.65;
+    }
+
+    /* Login overlay */
+    #login-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+      background-color: var(--bg-color);
+      z-index: 1000;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 20px;
+    }
+
+    .login-card {
+      background-color: var(--card-bg);
+      border-radius: 12px;
+      padding: 24px;
+      width: 100%;
+      max-width: 360px;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+      border: 1px solid var(--border-color);
+      text-align: center;
+    }
+
+    .login-card h2 {
+      font-size: 20px;
+      margin-bottom: 20px;
+      color: var(--primary-color);
+    }
+
+    .form-group {
+      margin-bottom: 14px;
+      text-align: left;
+    }
+
+    .form-group label {
+      display: block;
+      font-size: 12px;
+      font-weight: 600;
+      margin-bottom: 4px;
+      color: var(--text-muted);
+    }
+
+    .form-control {
+      width: 100%;
+      padding: 10px;
+      border-radius: 6px;
+      border: 1px solid var(--border-color);
+      /*
+        PHẢI ≥16px. iOS Safari tự phóng to CẢ TRANG khi người dùng bấm vào ô nhập
+        có cỡ chữ nhỏ hơn 16px, và không tự thu lại — màn hình lệch hẳn đi, phải
+        chụm tay thu nhỏ thủ công. Đây là nguyên nhân thứ ba của hiện tượng "bấm
+        bàn phím lên là nhảy lung tung" (cùng với thiếu --tg-viewport-height và
+        mâu thuẫn min-height ở trên).
+      */
+      font-size: 16px;
+      outline: none;
+    }
+
+    .login-btn {
+      width: 100%;
+      padding: 12px;
+      background-color: var(--primary-color);
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 14.5px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 10px;
+    }
+
+    .login-error {
+      color: #ef4444;
+      font-size: 12.5px;
+      margin-top: 10px;
+      display: none;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Login Overlay -->
+  <div id="login-overlay">
+    <div class="login-card">
+      <h2>VPH Operator Login</h2>
+      <form id="login-form">
+        <div class="form-group">
+          <label>Tài khoản / Email</label>
+          <input type="text" id="login-username" class="form-control" placeholder="admin" required autocomplete="username">
+        </div>
+        <div class="form-group">
+          <label>Mật khẩu</label>
+          <input type="password" id="login-password" class="form-control" placeholder="admin123" required autocomplete="current-password">
+        </div>
+        <div id="login-err-msg" class="login-error">Tài khoản hoặc mật khẩu không đúng!</div>
+        <button type="submit" class="login-btn">Đăng nhập</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Header -->
+  <header>
+    <!--
+      Tên shop PHẢI hiện ở đây. Ngày 29/07 nhân viên mở app thấy danh sách của
+      Ẩm Thực Xứ Huế trong khi bot báo chat của Farmers Market, mà trên màn hình
+      không có gì cho biết đang xem shop nào — mất khá lâu mới lần ra.
+    -->
+    <h1 id="ten-shop">VPH Operator Console</h1>
+    <!--
+      Ai đang trực. Ba nhân viên dùng chung màn hình này; không hiện danh tính
+      thì không ai biết mình đang thao tác dưới tài khoản nào.
+    -->
+    <span id="ten-nhan-vien" style="color:#fff; font-size:12px; font-weight:500; opacity:.9; margin-left:auto; margin-right:10px;"></span>
+    <a href="#" onclick="handleLogout(event)" style="color: white; font-size: 12px; text-decoration: none; font-weight: 500;">Đăng xuất</a>
+  </header>
+
+  <!-- Toggle filter -->
+  <div class="filter-bar">
+    <span>Xem tất cả cuộc hội thoại</span>
+    <label class="switch">
+      <input type="checkbox" id="toggle-filter" checked onchange="loadConversations()">
+      <span class="slider"></span>
+    </label>
+  </div>
+
+  <!-- Main Container -->
+  <div class="main-container">
+    <!-- Chat List View -->
+    <div id="chat-list-view">
+      <div style="text-align:center; padding:20px;" class="text-muted">Đang tải cuộc hội thoại...</div>
+    </div>
+
+    <!-- Chat Detail View -->
+    <div id="chat-detail-view">
+      <div class="detail-header">
+        <button class="back-btn" onclick="closeChatDetail()">&larr;</button>
+        <div class="detail-title" id="detail-title-text">Chi tiết cuộc chat</div>
+        <button class="takeover-btn" id="btn-takeover" onclick="triggerTakeover()">Tiếp quản</button>
+        <button class="takeover-btn" id="btn-tma-release" style="background-color:#0f766e; display:none;" onclick="triggerTmaRelease()">Trả lại Bot</button>
+      </div>
+      <div class="messages-container" id="detail-messages-container">
+        <!-- Messages bubble list -->
+      </div>
+      <div style="padding: 10px; background: var(--card-bg); border-top: 1px solid var(--border-color); display: flex; gap: 8px;">
+        <!--
+          `enterkeyhint="send"` đổi nhãn phím Enter trên bàn phím ảo thành "Gửi".
+          `preventDefault()` chặn hành vi mặc định của Enter (một số webview coi
+          đó là submit và tự đóng bàn phím).
+        -->
+        <input type="text" id="tma-reply-input" class="form-control"
+               placeholder="Nhập trả lời..."
+               enterkeyhint="send" autocomplete="off" autocapitalize="sentences"
+               onkeydown="if(event.key==='Enter'){event.preventDefault(); sendTmaReply();}">
+        <button id="btn-gui" class="takeover-btn" style="background-color: var(--primary-color); white-space: nowrap;"
+                onclick="sendTmaReply()">Gửi</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // =========================================================================
+    // VPH Operator Console — Telegram Mini App
+    //
+    // ⚠️ ĐÂY LÀ MÃ NGUỒN THẬT. Hai file `tma/app.js` và `tma/app.css` là code
+    // CHẾT — trang này không nạp chúng, sửa ở đó không có tác dụng gì.
+    //
+    // Ba điều đã từng làm hỏng màn hình này, ghi lại để đừng lặp:
+    //
+    // 1. `tenantId` gắn cứng. Bản trước ghi thẳng id của Ẩm Thực Xứ Huế rồi gửi
+    //    kèm mọi lệnh. Khi bot dời sang Farmers Market, `assertTenantScope` so
+    //    id đó với JWT thấy lệch và trả 403 — tiếp quản, trả lời, bàn giao đều
+    //    chết, mà giao diện chỉ nói "Lỗi". Nay KHÔNG gửi tenantId nữa: máy chủ
+    //    tự lấy từ JWT, gửi thêm chỉ tạo cơ hội sai.
+    //
+    // 2. `operatorId: "operator_tma"` cho mọi người. Ba nhân viên chung một
+    //    danh tính nên `assigned_to` vô nghĩa: không biết ai đang giữ hội thoại,
+    //    và hai người có thể cùng trả lời một khách. Nay dùng id Telegram thật.
+    //
+    // 3. Không xử lý 401. Token sống 24 giờ; hết hạn thì mọi lệnh im lặng hỏng
+    //    và màn hình treo ở "Lỗi tải cuộc hội thoại!" cho tới khi tắt app. Nay
+    //    gặp 401 là tự đăng nhập lại bằng initData rồi thử lại.
+    // =========================================================================
+    const tg = window.Telegram?.WebApp;
+
+    /** Id Telegram của người đang trực — dùng để biết hội thoại thuộc về ai. */
+    let idNhanVien = null;
+    let tenNhanVien = "";
+    let currentOpenConvId = null;
+
+    if (tg) {
+      tg.ready();
+      tg.expand();
+      if (typeof tg.disableVerticalSwipes === "function") {
+        // Không có dòng này thì vuốt để cuộn danh sách sẽ kéo tụt cả app xuống.
+        try { tg.disableVerticalSwipes(); } catch (e) {}
+      }
+      const u = tg.initDataUnsafe?.user;
+      if (u) {
+        idNhanVien = String(u.id);
+        tenNhanVien = u.username ? "@" + u.username : [u.first_name, u.last_name].filter(Boolean).join(" ");
+      }
+
+      // Gán chiều cao khung nhìn THẬT vào biến CSS, và gán lại mỗi lần Telegram
+      // báo thay đổi (bật/tắt bàn phím, xoay máy, kéo app to nhỏ).
+      //
+      // Thiếu hàm này thì `--tg-viewport-height` rỗng và toàn bộ bố cục rơi về
+      // `100vh` — chiều cao tính cả phần bàn phím che mất. Đây chính là nguyên
+      // nhân giao diện nhảy loạn khi gõ trên điện thoại.
+      //
+      // Dùng `viewportHeight` (co lại khi bàn phím lên) chứ KHÔNG dùng
+      // `viewportStableHeight`: ta muốn ô nhập nằm ngay trên bàn phím, không bị
+      // đẩy xuống dưới nó.
+      // ⚠️ CHỈ TIN `tg.viewportHeight` KHI THẬT SỰ CHẠY TRONG TELEGRAM.
+      //
+      // `telegram-web-app.js` vẫn tạo `window.Telegram.WebApp` khi mở bằng
+      // trình duyệt thường, nên `tg` luôn tồn tại — không dùng nó để phán đoán
+      // được. Ngoài Telegram thì `viewportHeight` là một con số CHẾT, không bao
+      // giờ đổi theo cửa sổ.
+      //
+      // Đo thật mới thấy: thu cửa sổ 812 → 450 rồi trả về 812, biến vẫn kẹt ở
+      // 450 và bố cục ghim ở chiều cao sai. Biến cũ đè lên `100dvh` nên còn hại
+      // hơn là không gán gì.
+      //
+      // `tg.platform` là 'unknown' khi không có client Telegram thật — đó mới là
+      // dấu hiệu đáng tin.
+      const trongTelegram = !!(tg.initData && tg.platform && tg.platform !== "unknown");
+      if (trongTelegram) {
+        const datKhungNhin = () => {
+          if (tg.viewportHeight) {
+            document.documentElement.style.setProperty("--khung-nhin", tg.viewportHeight + "px");
+          }
+        };
+        datKhungNhin();
+        if (typeof tg.onEvent === "function") tg.onEvent("viewportChanged", datKhungNhin);
+        // Nghe thêm `resize` phòng khi `viewportChanged` không bắn.
+        window.addEventListener("resize", datKhungNhin);
+      }
+    }
+
+    // ⚠️ NGOÀI TELEGRAM: CỐ TÌNH KHÔNG GÁN BIẾN.
+    //
+    // Bản trước gán `--tg-viewport-height` từ `visualViewport`. Nghe thì hợp lý
+    // nhưng đo thử thì hỏng: thu cửa sổ còn 450px mà biến vẫn kẹt ở 812px, body
+    // không co, trang tràn ra ngoài — đúng kiểu nhảy mà nó định chữa.
+    //
+    // `100dvh` do chính trình duyệt duy trì, đã trừ sẵn bàn phím, không bao giờ
+    // cũ. Không gán gì thì CSS tự dùng nó. Ít mã hơn và đúng hơn.
+
+    function rung(kieu) {
+      try { tg?.HapticFeedback?.notificationOccurred(kieu); } catch (e) {}
+    }
+
+    /**
+     * Hộp thoại. `alert()` bị một số client Telegram chặn thẳng — nhân viên bấm
+     * nút rồi không thấy gì, tưởng app đơ.
+     */
+    function bao(noiDung) {
+      if (tg && typeof tg.showAlert === "function") { try { return tg.showAlert(noiDung); } catch (e) {} }
+      alert(noiDung);
+    }
+
+    /** Ghi tên shop lên tiêu đề. Được phân nhiều shop thì cảnh báo rõ. */
+    function datTenShop(ten, nhieuShop) {
+      const o = document.getElementById("ten-shop");
+      if (!o) return;
+      o.textContent = ten ? `Trực chat · ${ten}` : "VPH Operator Console";
+      if (nhieuShop) {
+        o.textContent += " ⚠";
+        o.title = "Bạn được phân nhiều shop; màn hình đang hiện shop gốc. Báo quản trị nếu sai shop.";
+      }
+    }
+
+    function capNhatTenNhanVien() {
+      const o = document.getElementById("ten-nhan-vien");
+      if (o) o.textContent = tenNhanVien || "";
+    }
+
+    /** Đăng nhập bằng chữ ký Telegram. Trả về true nếu lấy được token. */
+    async function dangNhapTelegram() {
+      if (!tg || !tg.initData) return false;
+      try {
+        const res = await fetch("/v1/auth/tg-login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ initData: tg.initData })
+        });
+        if (!res.ok) return false;
+        const data = await res.json();
+        sessionStorage.setItem("vph_admin_token", data.token);
+        datTenShop(data.tenShop, data.nhieuShop);
+        return true;
+      } catch (err) {
+        console.error("[TMA] Đăng nhập Telegram lỗi:", err);
+        return false;
+      }
+    }
+
+    /**
+     * Gọi API kèm token, tự đăng nhập lại đúng MỘT lần khi gặp 401.
+     *
+     * Mọi lệnh của màn hình này phải đi qua đây. Gọi fetch thẳng là bỏ mất lớp
+     * gia hạn token, và lỗi sẽ hiện ra dưới dạng "không tải được" vô nghĩa.
+     */
+    async function goiAPI(duongDan, tuyChon = {}, choThuLai = true) {
+      const token = sessionStorage.getItem("vph_admin_token");
+      const res = await fetch(duongDan, {
+        ...tuyChon,
+        headers: {
+          "Content-Type": "application/json",
+          ...(tuyChon.headers || {}),
+          "Authorization": token ? `Bearer ${token}` : ""
+        }
+      });
+
+      if (res.status === 401 && choThuLai) {
+        if (await dangNhapTelegram()) return goiAPI(duongDan, tuyChon, false);
+        // Không đăng nhập lại được: mở lại form nhập tay.
+        document.getElementById("login-overlay").style.display = "flex";
+      }
+      return res;
+    }
+
+    document.addEventListener("DOMContentLoaded", async () => {
+      capNhatTenNhanVien();
+
+      // Luôn thử chữ ký Telegram trước, kể cả khi sessionStorage còn token —
+      // token cũ có thể đã hết hạn hoặc thuộc shop khác.
+      if (tg && tg.initData) {
+        if (await dangNhapTelegram()) {
+          document.getElementById("login-overlay").style.display = "none";
+          loadConversations();
+          return;
+        }
+      }
+
+      if (sessionStorage.getItem("vph_admin_token")) {
+        document.getElementById("login-overlay").style.display = "none";
+        loadConversations();
+        return;
+      }
+
+      // Mở ngoài Telegram (hoặc chưa đăng ký Telegram ID): hiện form nhập tay.
+      document.getElementById("login-overlay").style.display = "flex";
+    });
+
+    // Login Form Submit handler
+    document.getElementById("login-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const user = document.getElementById("login-username").value;
+      const pass = document.getElementById("login-password").value;
+      const errMsg = document.getElementById("login-err-msg");
+
+      try {
+        // Tên trường PHẢI là `username`/`password`. Bản trước gửi `user`/`pass`
+        // nên máy chủ luôn trả 400 "Missing username or password", còn màn hình
+        // lại hiện "Tài khoản hoặc mật khẩu không đúng!" — nhân viên đổi mật
+        // khẩu mấy lần vẫn không vào được, vì lỗi chưa bao giờ nằm ở mật khẩu.
+        const res = await fetch("/v1/auth/login", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ username: user, password: pass })
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          sessionStorage.setItem("vph_admin_token", data.token);
+          datTenShop(data.tenShop, data.nhieuShop);
+          // Đăng nhập tay thì không có danh tính Telegram — lấy tên tài khoản
+          // để `assigned_to` vẫn phân biệt được người trực.
+          if (!idNhanVien) {
+            idNhanVien = "admin:" + user;
+            tenNhanVien = user;
+            capNhatTenNhanVien();
+          }
+          document.getElementById("login-overlay").style.display = "none";
+          errMsg.style.display = "none";
+          loadConversations();
+        } else {
+          // Nói đúng lỗi thật. Gộp mọi mã lỗi thành "sai mật khẩu" khiến người
+          // dùng đi sửa thứ không hỏng — đúng vết xe đổ của lỗi user/pass ở trên.
+          const d = await res.json().catch(() => ({}));
+          errMsg.textContent = res.status === 401
+            ? "Tài khoản hoặc mật khẩu không đúng!"
+            : `Lỗi máy chủ (${res.status}): ${d.error || "không rõ nguyên nhân"}`;
+          errMsg.style.display = "block";
+        }
+      } catch (err) {
+        errMsg.textContent = "Không thể kết nối tới server!";
+        errMsg.style.display = "block";
+      }
+    });
+
+    /**
+     * Dấu vân của lần vẽ trước. Danh sách tự làm mới mỗi 5 giây; vẽ lại khi
+     * không có gì đổi sẽ giật màn hình và ném nhân viên về đầu danh sách ngay
+     * giữa lúc họ đang đọc.
+     */
+    let vanTayDanhSach = "";
+    /** Số hội thoại đang chờ người ở lần kiểm tra trước — để biết có ca MỚI. */
+    let soChoNguocTruoc = null;
+
+    // Fetch and load conversation list
+    async function loadConversations() {
+      const listContainer = document.getElementById("chat-list-view");
+      const onlyEscalated = !document.getElementById("toggle-filter").checked;
+
+      if (!sessionStorage.getItem("vph_admin_token")) return;
+
+      try {
+        // Query stub with all=true or false based on toggle
+        const url = `/v1/tg/conversations-list-dev-stub?all=${!onlyEscalated}`;
+        const res = await goiAPI(url);
+
+        if (!res.ok) throw new Error("Load failed");
+        const list = await res.json();
+
+        // Có khách MỚI cần trợ giúp thì rung máy. Nhân viên không thể ngồi nhìn
+        // màn hình liên tục; không báo thì khách chờ tới lúc bỏ đi.
+        const soChoNguoi = list.filter(c => c.mode === "CHO_NGUOI").length;
+        if (soChoNguocTruoc !== null && soChoNguoi > soChoNguocTruoc) rung("warning");
+        soChoNguocTruoc = soChoNguoi;
+
+        const vanTay = JSON.stringify(list.map(c => [c.id, c.mode, c.assigned_to, c.last_message, c.last_customer_msg_at]));
+        if (vanTay === vanTayDanhSach) return;   // Không có gì đổi — giữ nguyên màn hình.
+        vanTayDanhSach = vanTay;
+
+        listContainer.innerHTML = "";
+
+        if (list.length === 0) {
+          listContainer.innerHTML = '<div style="text-align:center; padding:20px;" class="text-muted">Không có cuộc hội thoại nào.</div>';
+          return;
+        }
+
+        list.forEach(c => {
+          const card = document.createElement("div");
+          card.className = "chat-card";
+          card.onclick = () => openChatDetail(c.id, c.visitor_id, c.mode, c.assigned_to);
+
+          const timeStr = c.last_customer_msg_at ? new Date(c.last_customer_msg_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : new Date(c.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+          // Phân biệt "mình đang trực" với "người khác đang trực". Thiếu vế này
+          // thì hai nhân viên dễ cùng nhảy vào một khách.
+          const cuaToi = c.mode === "NGUOI" && c.assigned_to && c.assigned_to === idNhanVien;
+          const modeBadge = c.mode === "BOT" ? '<span class="badge badge-bot">AI Bot</span>' :
+                            c.mode === "CHO_NGUOI" ? '<span class="badge badge-waiting">Đợi người</span>' :
+                            cuaToi ? '<span class="badge badge-human">Bạn đang trực</span>' :
+                            `<span class="badge badge-human" style="opacity:.65;">Người khác trực${c.assigned_to ? " · " + escapeHtml(String(c.assigned_to)) : ""}</span>`;
+
+          const lastMsg = c.last_message || "Chưa có tin nhắn";
+
+          card.innerHTML = `
+            <div class="chat-card-header">
+              <span class="visitor-id">${escapeHtml(c.visitor_id)}</span>
+              <span class="chat-time">${timeStr}</span>
+            </div>
+            <div class="chat-card-header" style="margin-top:2px;">
+              ${modeBadge}
+              ${c.ly_do_leo_thang ? `<span style="font-size:11px; color:#ef4444; font-weight:500;">${escapeHtml(c.ly_do_leo_thang)}</span>` : ""}
+            </div>
+            <div class="chat-card-body">${escapeHtml(lastMsg)}</div>
+          `;
+          listContainer.appendChild(card);
+        });
+      } catch (err) {
+        // Xoá vân tay: nếu không, lần tải sau trùng dữ liệu cũ sẽ thoát sớm và
+        // để lại thông báo lỗi trên màn hình dù mọi thứ đã bình thường trở lại.
+        vanTayDanhSach = "";
+        listContainer.innerHTML = '<div style="text-align:center; padding:20px; color:#ef4444;">Lỗi tải cuộc hội thoại!</div>';
+      }
+    }
+
+    let activeTmaMsgTimer = null;
+
+    async function fetchTmaMessages(convId, isAutoRefresh = false) {
+      const msgContainer = document.getElementById("detail-messages-container");
+      const token = sessionStorage.getItem("vph_admin_token");
+      if (!msgContainer || !token || !convId) return;
+
+      try {
+        const res = await goiAPI(`/v1/tg/conversation-messages-dev-stub?id=${encodeURIComponent(convId)}`);
+
+        if (!res.ok) throw new Error("Load failed");
+        const messages = await res.json();
+        
+        const isAtBottom = msgContainer.scrollHeight - msgContainer.clientHeight <= msgContainer.scrollTop + 50;
+        msgContainer.innerHTML = "";
+
+        if (messages.length === 0) {
+          msgContainer.innerHTML = '<div style="text-align:center; padding:20px;" class="text-muted">Không có tin nhắn nào.</div>';
+          return;
+        }
+
+        messages.forEach(m => {
+          const bubble = document.createElement("div");
+          const isBot = m.vai_tro === "bot";
+          const isOperator = m.vai_tro === "nguoi";
+
+          if (isBot) {
+            bubble.className = "bubble bubble-bot";
+          } else if (isOperator) {
+            bubble.className = "bubble bubble-bot";
+            bubble.style.backgroundColor = "#2563eb";
+          } else {
+            bubble.className = "bubble bubble-customer";
+          }
+
+          const timeStr = m.tao_luc ? new Date(m.tao_luc).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : '';
+          const roleLabel = isOperator ? "[Nhân viên] " : "";
+          
+          bubble.innerHTML = `
+            <div>${escapeHtml(m.noi_dung)}</div>
+            <div class="bubble-time">${roleLabel}${timeStr}</div>
+          `;
+          msgContainer.appendChild(bubble);
+        });
+
+        if (!isAutoRefresh || isAtBottom) {
+          msgContainer.scrollTop = msgContainer.scrollHeight;
+        }
+      } catch (err) {
+        if (!isAutoRefresh) {
+          msgContainer.innerHTML = '<div style="text-align:center; padding:20px; color:#ef4444;">Lỗi tải tin nhắn!</div>';
+        }
+      }
+    }
+
+    /**
+     * Bật/tắt các nút theo quyền thực tế trên hội thoại.
+     *
+     * Bản trước chỉ nhìn `mode`: hội thoại do người KHÁC trực vẫn hiện nút "Trả
+     * lại Bot" và ô nhập vẫn gõ được — hai nhân viên cùng nói với một khách,
+     * hoặc người này bàn giao mất hội thoại của người kia.
+     */
+    /**
+     * Gán trạng thái khoá cho ô nhập, nhưng CHỈ KHI GIÁ TRỊ THẬT SỰ ĐỔI.
+     *
+     * Gán `disabled` — kể cả gán lại đúng giá trị đang có — vẫn gỡ con trỏ khỏi
+     * ô nhập, và trên điện thoại mất con trỏ là bàn phím tụt xuống. Hàm
+     * `capNhatQuyen` được gọi lại sau MỖI lần gửi, nên không có lớp chắn này thì
+     * cứ bấm Enter một cái là bàn phím nhấp nháy một lần.
+     */
+    function datKhoaONhap(oNhap, khoa) {
+      if (oNhap.disabled !== khoa) oNhap.disabled = khoa;
+    }
+
+    function capNhatQuyen(mode, assignedTo) {
+      const btnTakeover = document.getElementById("btn-takeover");
+      const btnRelease = document.getElementById("btn-tma-release");
+      const oNhap = document.getElementById("tma-reply-input");
+      const cuaToi = mode === "NGUOI" && assignedTo && assignedTo === idNhanVien;
+
+      if (cuaToi) {
+        btnTakeover.style.display = "none";
+        btnRelease.style.display = "block";
+        datKhoaONhap(oNhap, false);
+        oNhap.placeholder = "Nhập trả lời...";
+      } else if (mode === "NGUOI") {
+        btnTakeover.style.display = "none";
+        btnRelease.style.display = "none";
+        datKhoaONhap(oNhap, true);
+        oNhap.placeholder = "Nhân viên khác đang trực hội thoại này";
+      } else {
+        btnTakeover.style.display = "block";
+        btnRelease.style.display = "none";
+        datKhoaONhap(oNhap, true);
+        oNhap.placeholder = 'Bấm "Tiếp quản" để trả lời khách';
+      }
+    }
+
+    // Open conversation message detail bubble list
+    async function openChatDetail(convId, visitorId, mode, assignedTo) {
+      currentOpenConvId = convId;
+      const detailView = document.getElementById("chat-detail-view");
+      const titleText = document.getElementById("detail-title-text");
+      const msgContainer = document.getElementById("detail-messages-container");
+
+      titleText.textContent = visitorId;
+      capNhatQuyen(mode, assignedTo);
+
+      // Nút Back của Telegram. Không gắn thì người dùng bấm back quen tay sẽ
+      // đóng luôn cả mini app thay vì quay về danh sách.
+      if (tg?.BackButton) {
+        try { tg.BackButton.show(); } catch (e) {}
+      }
+
+      detailView.classList.add("active");
+      msgContainer.innerHTML = '<div style="text-align:center; padding:20px;" class="text-muted">Đang tải tin nhắn...</div>';
+
+      await fetchTmaMessages(convId);
+
+      if (activeTmaMsgTimer) clearInterval(activeTmaMsgTimer);
+      activeTmaMsgTimer = setInterval(() => {
+        if (currentOpenConvId && detailView.classList.contains("active")) {
+          fetchTmaMessages(currentOpenConvId, true);
+        }
+      }, 3000);
+    }
+
+    // Send operator reply from TMA
+    /** Đang có một lượt gửi chạy dở — chặn bấm Gửi hai lần. */
+    let dangGui = false;
+
+    async function sendTmaReply() {
+      const input = document.getElementById("tma-reply-input");
+      if (!input || !input.value.trim() || !currentOpenConvId) return;
+      if (dangGui) return;
+
+      const text = input.value.trim();
+
+      // ⚠️ TUYỆT ĐỐI KHÔNG `input.disabled = true` Ở ĐÂY.
+      //
+      // Vô hiệu hoá một ô nhập là gỡ luôn con trỏ khỏi nó, và trên điện thoại
+      // mất con trỏ = BÀN PHÍM TỤT XUỐNG. Bản trước vô hiệu hoá lúc gửi rồi
+      // `focus()` lại lúc xong, nên mỗi lần bấm Enter là bàn phím ẩn đi rồi bật
+      // lại — nhân viên trả lời liên tục thì màn hình nhấp nháy suốt.
+      //
+      // Chặn gửi trùng bằng một biến cờ, không đụng tới con trỏ. Nút Gửi thì vô
+      // hiệu hoá được vì nó không giữ con trỏ.
+      dangGui = true;
+      const nutGui = document.getElementById("btn-gui");
+      if (nutGui) nutGui.disabled = true;
+
+      // KHÔNG xoá ô nhập trước khi gửi xong. Bản trước xoá ngay dòng đầu: mạng
+      // chập một cái là nhân viên mất trắng câu vừa gõ, gõ lại từ đầu.
+      try {
+        const res = await goiAPI(`/v1/admin/conversations/${currentOpenConvId}/reply`, {
+          method: "POST",
+          // Không gửi `tenantId`: máy chủ lấy từ JWT. Gửi kèm chỉ tạo cơ hội lệch.
+          body: JSON.stringify({ text, operatorId: idNhanVien || "admin" })
+        });
+
+        if (res.ok) {
+          input.value = "";
+          await fetchTmaMessages(currentOpenConvId);
+          capNhatQuyen("NGUOI", idNhanVien);
+          vanTayDanhSach = "";
+          loadConversations();
+        } else {
+          const d = await res.json().catch(() => ({}));
+          rung("error");
+          bao("Không gửi được tin nhắn: " + (d.error || res.status));
+        }
+      } catch (err) {
+        rung("error");
+        bao("Lỗi kết nối, tin nhắn chưa gửi được.");
+      } finally {
+        dangGui = false;
+        if (nutGui) nutGui.disabled = false;
+        // KHÔNG gọi `input.focus()`: con trỏ chưa bao giờ rời ô nhập nên bàn
+        // phím vẫn đang mở. Gọi focus() lúc này chỉ khiến một số webview đóng
+        // rồi mở lại bàn phím — đúng cái nhấp nháy ta vừa chữa.
+      }
+    }
+
+    // Claim conversation (takeover)
+    async function triggerTakeover() {
+      if (!currentOpenConvId) return;
+      const btnTakeover = document.getElementById("btn-takeover");
+      btnTakeover.disabled = true;
+
+      try {
+        const res = await goiAPI(`/v1/admin/conversations/${currentOpenConvId}/takeover`, {
+          method: "POST",
+          body: JSON.stringify({ operatorId: idNhanVien || "admin" })
+        });
+
+        if (res.ok) {
+          rung("success");
+          capNhatQuyen("NGUOI", idNhanVien);
+          document.getElementById("tma-reply-input").focus();
+          vanTayDanhSach = "";
+          loadConversations();
+        } else if (res.status === 409) {
+          // Máy chủ chỉ cho tiếp quản khi chưa ai giữ (assigned_to IS NULL).
+          // 409 nghĩa là vừa có người nhanh tay hơn — nói thẳng cho đỡ bối rối.
+          rung("warning");
+          bao("Nhân viên khác vừa tiếp quản hội thoại này trước bạn.");
+          vanTayDanhSach = "";
+          await loadConversations();
+          closeChatDetail();
+        } else {
+          const d = await res.json().catch(() => ({}));
+          rung("error");
+          bao("Không tiếp quản được: " + (d.error || res.status));
+        }
+      } catch (err) {
+        rung("error");
+        bao("Lỗi kết nối tới máy chủ.");
+      } finally {
+        btnTakeover.disabled = false;
+      }
+    }
+
+    // Release conversation back to bot from TMA
+    async function triggerTmaRelease() {
+      if (!currentOpenConvId) return;
+      const btnRelease = document.getElementById("btn-tma-release");
+      btnRelease.disabled = true;
+
+      try {
+        const res = await goiAPI(`/v1/admin/conversations/${currentOpenConvId}/release`, {
+          method: "POST",
+          body: JSON.stringify({})
+        });
+
+        if (res.ok) {
+          rung("success");
+          capNhatQuyen("BOT", null);
+          await fetchTmaMessages(currentOpenConvId);
+          vanTayDanhSach = "";
+          loadConversations();
+        } else {
+          const d = await res.json().catch(() => ({}));
+          rung("error");
+          bao("Không bàn giao lại được cho Bot: " + (d.error || res.status));
+        }
+      } catch (err) {
+        rung("error");
+        bao("Lỗi kết nối tới máy chủ.");
+      } finally {
+        btnRelease.disabled = false;
+      }
+    }
+
+    function closeChatDetail() {
+      document.getElementById("chat-detail-view").classList.remove("active");
+      if (activeTmaMsgTimer) {
+        clearInterval(activeTmaMsgTimer);
+        activeTmaMsgTimer = null;
+      }
+      currentOpenConvId = null;
+      if (tg?.BackButton) {
+        try { tg.BackButton.hide(); } catch (e) {}
+      }
+      // Buộc vẽ lại danh sách: trạng thái hội thoại vừa xem có thể đã đổi.
+      vanTayDanhSach = "";
+      loadConversations();
+    }
+
+    // Bàn phím lên thì khung chat phải cuộn xuống đáy.
+    //
+    // Không có đoạn này thì tin nhắn cuối bị bàn phím che, nhân viên vừa gõ vừa
+    // không thấy khách vừa nói gì. Chờ một nhịp vì bố cục cần thời gian co lại
+    // theo chiều cao khung nhìn mới.
+    const oNhapTraLoi = document.getElementById("tma-reply-input");
+    if (oNhapTraLoi) {
+      oNhapTraLoi.addEventListener("focus", () => {
+        setTimeout(() => {
+          const c = document.getElementById("detail-messages-container");
+          if (c) c.scrollTop = c.scrollHeight;
+        }, 300);
+      });
+    }
+
+    // Nút Back của Telegram quay về danh sách thay vì đóng cả app.
+    if (tg?.BackButton && typeof tg.onEvent === "function") {
+      try { tg.onEvent("backButtonClicked", closeChatDetail); } catch (e) {}
+    }
+
+    // Auto-polling 5s for TMA conversation list
+    setInterval(() => {
+      const detailView = document.getElementById("chat-detail-view");
+      if (!detailView || !detailView.classList.contains("active")) {
+        loadConversations();
+      }
+    }, 5000);
+
+    function handleLogout(e) {
+      e.preventDefault();
+      sessionStorage.removeItem("vph_admin_token");
+      closeChatDetail();
+      // Xoá luôn danh tính, nếu không người đăng nhập kế tiếp sẽ thao tác dưới
+      // tên người vừa đăng xuất.
+      idNhanVien = null;
+      tenNhanVien = "";
+      capNhatTenNhanVien();
+      vanTayDanhSach = "";
+      soChoNguocTruoc = null;
+      document.getElementById("login-overlay").style.display = "flex";
+      document.getElementById("login-username").value = "";
+      document.getElementById("login-password").value = "";
+    }
+
+    function escapeHtml(text) {
+      if (!text) return "";
+      return text
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,45 @@
+{
+  "name": "ChatBotAISAAS",
+  "version": "0.1.0",
+  "description": "Multi-tenant AI Chatbot SaaS Backend",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "nodemon src/index.ts",
+    "worker": "ts-node src/worker.ts",
+    "test": "jest",
+    "test:legacy": "ts-node src/run-tests.ts",
+    "typecheck": "tsc --noEmit",
+    "tg:webhook": "ts-node src/scripts/dangKyWebhookTelegram.ts",
+    "migrate": "ts-node src/db/migrate.ts",
+    "settings": "ts-node src/scripts/caiDat.ts"
+  },
+  "dependencies": {
+    "bullmq": "^5.8.3",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "nodemailer": "^9.0.3",
+    "pg": "^8.11.5",
+    "redis": "^4.6.13"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jest": "^29.5.12",
+    "@types/jsonwebtoken": "^9.0.6",
+    "@types/node": "^20.12.7",
+    "@types/nodemailer": "^8.0.1",
+    "@types/pg": "^8.11.5",
+    "@types/supertest": "^6.0.2",
+    "jest": "^29.7.0",
+    "nodemon": "^3.1.0",
+    "supertest": "^6.3.4",
+    "ts-jest": "^29.1.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  }
+}

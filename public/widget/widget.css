@@ -1,0 +1,363 @@
+/*
+  Giao diện khung chat, đồng bộ với popup chat trong theo-doi-don-hang.html:
+  nền ngà, đầu trang đỏ rượu, bong bóng giấy, nút gợi ý viền đồng.
+  Giữ nguyên tên class/id để widget.js không đổi.
+*/
+:root {
+  --burgundy: #6B1E2E;
+  --burgundy-deep: #4E1521;
+  --ivory: #F7F3EC;
+  --paper: #FBF8F2;
+  --charcoal: #1C1A19;
+  --copper: #B08D57;
+  --copper-text: #7D5F32;
+  --copper-hi: #E4C998;
+  --ink: #1C1A19;
+  --ink-2: #4A433D;
+  --ink-3: #6B6259;
+  --line: #E2D9C9;
+  --serif: 'Cormorant Garamond', Georgia, serif;
+  --sans: 'Be Vietnam Pro', system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: var(--sans);
+  background-color: transparent;
+  color: var(--ink);
+  height: 100vh;
+  display: flex;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+#chat-widget {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  background-color: var(--ivory);
+  border: 0;
+  border-radius: 0;
+  overflow: hidden;
+}
+
+/* Header */
+.chat-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 8px 12px 18px;
+  background-color: var(--burgundy);
+  color: var(--ivory);
+}
+
+.header-info {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* Avatar tròn có biểu tượng sao lấp lánh, giống trang theo dõi đơn */
+.status-indicator {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  flex: none;
+  background-color: rgba(228, 201, 152, 0.18);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23E4C998' stroke-width='1.6' stroke-linejoin='round'%3E%3Cpath d='M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: 20px 20px;
+}
+
+.chat-header h3 {
+  font-family: var(--serif);
+  font-size: 24px;
+  font-weight: 500;
+  line-height: 1.1;
+  color: var(--ivory);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-header .subtext {
+  display: block;
+  font-size: 12px;
+  color: #EBDCD6;
+}
+
+/*
+  Cụm nút ở góc phải header: thùng rác (xoá lịch sử) đứng NGAY CẠNH dấu X.
+  `margin-left: auto` giữ cụm luôn dính mép phải kể cả khi tên cửa hàng dài.
+*/
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  flex: none;
+}
+
+.close-btn {
+  background: none;
+  border: none;
+  color: var(--ivory);
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+  width: 44px;
+  height: 44px;
+  display: grid;
+  place-items: center;
+  border-radius: 0;
+  transition: background-color 0.15s ease;
+}
+.close-btn:hover {
+  background-color: rgba(247, 243, 236, 0.12);
+}
+.close-btn:focus-visible {
+  outline: 2px solid var(--copper-hi);
+  outline-offset: -2px;
+}
+
+/* Nút biểu tượng (thùng rác) nhỏ hơn dấu X một chút cho cân mắt. */
+.close-btn.icon-btn {
+  font-size: 17px;
+}
+.close-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Logs */
+.chat-logs {
+  flex: 1;
+  min-height: 0;
+  padding: 18px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background-color: var(--ivory);
+  scrollbar-width: thin;
+}
+
+.message {
+  display: flex;
+  flex-direction: column;
+  max-width: 86%;
+  animation: fadeUp 0.25s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.message.user-message {
+  align-self: flex-end;
+}
+
+.message.bot-message {
+  align-self: flex-start;
+}
+
+.message.system-message {
+  align-self: center;
+  max-width: 100%;
+}
+
+.message .bubble {
+  padding: 12px 14px;
+  font-size: 14.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.message.user-message .bubble {
+  background-color: var(--burgundy);
+  color: #ffffff;
+}
+
+.message.bot-message .bubble {
+  background-color: var(--paper);
+  color: var(--ink);
+  border: 1px solid var(--line);
+}
+
+.message.system-message .bubble {
+  background-color: transparent;
+  color: var(--ink-3);
+  font-size: 12px;
+  text-align: center;
+  border: 0;
+}
+
+/* Product Cards rendering */
+.product-card {
+  margin-top: 10px;
+  background-color: var(--paper);
+  border: 1px solid var(--line);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  width: 220px;
+  max-width: 100%;
+}
+
+.product-card img {
+  width: 100%;
+  height: 120px;
+  object-fit: cover;
+}
+
+.product-info {
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.product-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ink);
+}
+
+.product-price {
+  font-size: 13px;
+  color: var(--copper-text);
+  font-weight: 600;
+}
+
+.product-link {
+  display: inline-block;
+  margin-top: 6px;
+  min-height: 40px;
+  padding: 10px;
+  text-align: center;
+  background-color: var(--burgundy);
+  color: #ffffff;
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+/* Typing indicator */
+.typing-indicator {
+  display: none;
+  align-self: flex-start;
+  padding: 12px 14px;
+  background-color: var(--paper);
+  border: 1px solid var(--line);
+  margin-left: 18px;
+  margin-bottom: 12px;
+}
+
+.typing-indicator span {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--ink-3);
+  margin-right: 4px;
+  animation: typing 1s infinite alternate;
+}
+
+.typing-indicator span:nth-child(2) { animation-delay: 0.2s; }
+.typing-indicator span:nth-child(3) { animation-delay: 0.4s; }
+
+/* Input Footer: giống ô nhập của trang theo dõi đơn */
+.chat-footer {
+  flex: none;
+  padding: 10px 18px 6px;
+  background-color: var(--paper);
+  border-top: 1px solid var(--line);
+}
+
+#chat-form {
+  display: flex;
+  gap: 8px;
+}
+
+#chat-input {
+  flex: 1;
+  min-width: 0;
+  height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--ink);
+  background-color: #ffffff;
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 16px;
+  outline: none;
+  border-radius: 0;
+}
+#chat-input:focus-visible {
+  outline: 2px solid var(--burgundy);
+  outline-offset: 2px;
+}
+
+#send-btn {
+  background-color: var(--burgundy);
+  border: none;
+  border-radius: 0;
+  width: 44px;
+  height: 44px;
+  flex: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background-color 0.15s ease;
+}
+#send-btn:hover {
+  background-color: var(--burgundy-deep);
+}
+#send-btn:focus-visible {
+  outline: 2px solid var(--burgundy);
+  outline-offset: 2px;
+}
+#send-btn svg {
+  width: 18px;
+  height: 18px;
+  fill: #ffffff;
+}
+
+/* Ghi chú dưới ô nhập, cùng ý với trang theo dõi đơn */
+.chat-footer::after {
+  content: "Trợ lý AI có thể nhầm. Việc đổi địa chỉ, hủy đơn và hoàn tiền do nhân viên xác nhận.";
+  display: block;
+  padding: 6px 0 4px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--ink-3);
+}
+
+/* Animations */
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes typing {
+  from { transform: translateY(0); }
+  to { transform: translateY(-5px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .message { animation: none; }
+  .typing-indicator span { animation: none; }
+}

@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>VPH Chatbot SaaS Admin Panel</title>
+  <link rel="stylesheet" href="admin.css">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+</head>
+<body>
+  <div id="admin-app">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="logo">VPH</div>
+        <h2>VPH AI ChatBot</h2>
+      </div>
+      
+      <!-- Role Switcher (For Development and testing views) -->
+      <!-- Role Switcher & Language Selector -->
+      <div class="role-switcher" style="display: flex; flex-direction: column; gap: 6px;">
+        <div>
+          <label for="role-select" data-i18n="role_label">Vai trò:</label>
+          <select id="role-select">
+            <option value="tenant_admin">Tenant Admin (Shop)</option>
+            <option value="super_admin">Super Admin (VPH)</option>
+          </select>
+        </div>
+      </div>
+
+      <nav class="nav-menu">
+        <a href="#overview" class="nav-item active" data-target="panel-overview" data-i18n="nav_overview">Tổng quan</a>
+        <a href="#super-tenants" class="nav-item super-only" data-target="panel-super-tenants" data-i18n="nav_super_tenants">Quản lý Tenants</a>
+        <a href="#meili" class="nav-item super-only" data-target="panel-meili" data-i18n="nav_meili">Tìm kiếm (Meilisearch)</a>
+        <a href="#app-settings" class="nav-item super-only" data-target="panel-app-settings">Cấu hình hệ thống</a>
+        <a href="#domains" class="nav-item tenant-only" data-target="panel-domains" data-i18n="nav_domains">Tên miền & Keys</a>
+        <a href="#accounts" class="nav-item tenant-only" data-target="panel-accounts" data-i18n="nav_accounts">Nhân sự (Operators)</a>
+        <a href="#documents" class="nav-item tenant-only" data-target="panel-documents" data-i18n="nav_documents">Tài liệu tri thức (KB)</a>
+        <a href="#scripts" class="nav-item tenant-only" data-target="panel-scripts" data-i18n="nav_scripts">Kịch bản cứng (Q&A)</a>
+        <a href="#credits" class="nav-item tenant-only" data-target="panel-credits" data-i18n="nav_credits">Lịch sử Credit</a>
+        <a href="#settings" class="nav-item tenant-only" data-target="panel-settings" data-i18n="nav_settings">Cấu hình Bot</a>
+        <a href="#conversations" class="nav-item tenant-only" data-target="panel-conversations" data-i18n="nav_conversations">Lịch sử Chat</a>
+      </nav>
+
+      <div class="sidebar-footer" style="display: flex; flex-direction: column; gap: 8px;">
+        <span id="active-tenant-display">Tenant: VPH AI ChatBot Pilot</span>
+        <a href="#" onclick="logout(event)" style="color: #ef4444; font-size: 12px; text-decoration: none; font-weight: 500;" data-i18n="logout">&rarr; Đăng xuất</a>
+      </div>
+    </aside>
+
+    <!-- Main Workspace -->
+    <main class="workspace">
+      <header class="workspace-header">
+        <div class="page-title">
+          <h1 id="page-header-title" data-i18n="page_overview">Tổng quan hệ thống</h1>
+        </div>
+        <div class="header-widgets" style="display: flex; align-items: center; gap: 15px;">
+          <!-- Language Selector Dropdown -->
+          <div style="display: flex; align-items: center; gap: 6px;">
+            <select id="lang-selector" class="form-control" style="font-size: 12.5px; padding: 5px 10px; border-radius: 6px; background: var(--bg-dark); color: var(--text-main); cursor: pointer;" onchange="onLangSelectorChange(this.value)">
+              <option value="vi">🇻🇳 Tiếng Việt</option>
+              <option value="en">🇬🇧 English</option>
+              <option value="import_csv">+ 📥 Nhập CSV Ngôn ngữ...</option>
+            </select>
+          </div>
+          <div class="credit-widget">
+            <span class="muted" data-i18n="balance_label">Số dư:</span>
+            <span id="credit-balance-display" class="credit-val">1.000đ</span>
+          </div>
+        </div>
+      </header>
+
+      <div class="content-body">
+        
+        <!-- Panel 1: Overview -->
+        <section id="panel-overview" class="panel active">
+          <div class="stats-grid">
+            <div class="stat-card">
+              <h3>Hội thoại đang hoạt động</h3>
+              <p class="stat-num" id="stat-active-conv">2</p>
+            </div>
+            <div class="stat-card">
+              <h3>Tài liệu đã nạp</h3>
+              <p class="stat-num" id="stat-docs-count">5</p>
+            </div>
+            <div class="stat-card">
+              <h3>Credit đã tiêu (Tháng)</h3>
+              <p class="stat-num" id="stat-credits-used">250đ</p>
+            </div>
+          </div>
+        </section>
+
+        <!-- Panel 2: Super Tenants Manager -->
+        <section id="panel-super-tenants" class="panel">
+          <div class="panel-header">
+            <h2>Đăng ký & Quản lý Website Tenants</h2>
+            <button class="btn" onclick="showCreateTenantModal()">+ Thêm Tenant mới</button>
+          </div>
+          <!--
+            Bộ lọc shop thật. Cơ sở dữ liệu tích lại 176 tenant rác từ các đợt
+            test tự động — chúng lấp kín bảng khiến 3 shop thật lẫn mất. "Shop
+            thật" = đã cấu hình `medusa_base_url`, tức có gắn cửa hàng.
+            Mặc định BẬT; muốn xem đủ thì bỏ tick.
+          -->
+          <div class="card" style="padding:12px 16px; margin-bottom:14px; display:flex; align-items:center; gap:10px;">
+            <input type="checkbox" id="loc-shop-that" checked style="width:16px; height:16px;">
+            <label for="loc-shop-that" style="margin:0; cursor:pointer;">
+              Chỉ hiện shop đang hoạt động (đã gắn Medusa)
+            </label>
+            <span id="tenant-dem" class="muted" style="margin-left:auto; font-size:13px;"></span>
+          </div>
+          <table class="data-table" id="tenants-table">
+            <thead>
+              <tr>
+                <th>Tên website/shop</th>
+                <th>Ngành nghề</th>
+                <th>Bậc dữ liệu</th>
+                <th>Tường lửa Claim</th>
+                <th>Số dư Credit</th>
+                <th>Hành động</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- Populated dynamically -->
+            </tbody>
+          </table>
+        </section>
+
+        <!--
+          Panel Meilisearch — sức khoẻ tầng tìm kiếm.
+
+          Bot tra hàng bằng Meilisearch chứ không hỏi thẳng Medusa. Index hỏng
+          thì mọi triệu chứng đều đổ về một câu vô hại: "không tìm thấy sản
+          phẩm". Bảng này để nhìn ra sự thật trước khi khách kịp phàn nàn.
+
+          Đêm 29/07/2026 index tụt từ 49.139 xuống 11.520 document mà không ai
+          hay — chính bảng này phát hiện ra.
+        -->
+        <section id="panel-meili" class="panel">
+          <div class="panel-header">
+            <h2>Tầng tìm kiếm — Meilisearch</h2>
+            <button class="btn btn-secondary" onclick="taiTrangThaiMeili()">Làm mới</button>
+          </div>
+          <div id="meili-noi-dung" class="card" style="padding:20px;">
+            <span class="muted">Đang tải…</span>
+          </div>
+        </section>
+
+        <!--
+          Panel Cấu hình hệ thống — bảng app_settings (DB chatbot), phạm vi nền tảng.
+          Khoá bí mật không bao giờ hiện lại giá trị: chỉ 4 ký tự cuối. Để trống ô = giữ nguyên.
+          Dữ liệu cửa hàng (hotline, ngân hàng, SMTP gửi khách) KHÔNG ở đây mà ở Medusa admin.
+        -->
+        <section id="panel-app-settings" class="panel">
+          <div class="panel-header">
+            <h2>Cấu hình hệ thống (DeepSeek, SMTP admin, Telegram)</h2>
+            <button class="btn btn-secondary" onclick="taiCaiDatHeThong()">Làm mới</button>
+          </div>
+          <div id="app-settings-noi-dung" class="card" style="padding:20px;">
+            <span class="muted">Đang tải…</span>
+          </div>
+        </section>
+
+        <!-- Panel 3: Domain & Key configuration -->
+        <section id="panel-domains" class="panel">
+          <div class="panel-header">
+            <h2>Cấu hình Widget API Keys & Chặn Tên Miền</h2>
+          </div>
+          <div class="card">
+            <h3>Khóa Widget công khai (Public Key)</h3>
+            <div class="key-box">
+              <code id="public-key-val">pk_live_a3f9...</code>
+              <button class="btn btn-secondary" onclick="rotateApiKey()">Xoay khóa (Rotate)</button>
+            </div>
+          </div>
+          <div class="card" style="margin-top: 20px;">
+            <h3>Danh sách tên miền được phép nhúng (Origin Allowlist)</h3>
+            <p class="muted" style="margin-bottom: 12px; font-size: 13px;">
+              Chỉ các tên miền được khai báo dưới đây mới có thể tải được chat widget. Khai báo cách nhau bởi dấu phẩy.
+            </p>
+            <form id="domains-form">
+              <textarea id="domain-allowlist-input" placeholder="Ví dụ: https://shop.com, https://sandbox-shop.com" rows="3" class="form-control"></textarea>
+              <button type="submit" class="btn" style="margin-top: 10px;">Lưu cấu hình tên miền</button>
+            </form>
+          </div>
+        </section>
+
+        <!-- Panel 4: Personnel Accounts -->
+        <section id="panel-accounts" class="panel">
+          <div class="panel-header">
+            <h2>Tài khoản Nhân viên trực chat</h2>
+            <button class="btn" onclick="showAddOperatorModal()">+ Thêm Nhân viên</button>
+          </div>
+          <table class="data-table" id="operators-table">
+            <thead>
+              <tr>
+                <th>Tên nhân viên</th>
+                <th>Telegram ID</th>
+                <th>Hành động</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- Dynamic -->
+            </tbody>
+          </table>
+        </section>
+
+        <!-- Panel 5: Documents Knowledge Base (Ingestion) -->
+        <section id="panel-documents" class="panel">
+          <div class="panel-header">
+            <h2>Tài liệu tri thức sản phẩm (Knowledge Base)</h2>
+          </div>
+          
+          <div class="upload-dropzone" id="upload-zone">
+            <svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96zM14 13v4h-4v-4H7l5-5 5 5h-3z"/></svg>
+            <p>Kéo thả tài liệu PDF, DOCX, CSV hoặc Excel vào đây</p>
+            <span class="muted">Dung lượng tối đa 20MB</span>
+          </div>
+
+          <table class="data-table" id="documents-table" style="margin-top: 20px;">
+            <thead>
+              <tr>
+                <th>Tên tài liệu</th>
+                <th>Loại file</th>
+                <th>Kích thước</th>
+                <th>Trạng thái</th>
+                <th>Cảnh báo / Lỗi</th>
+                <th>Hành động</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- Dynamic -->
+            </tbody>
+          </table>
+        </section>
+
+        <!-- Panel 6: Q&A Scripts (Hard-coded Match scripts) -->
+        <section id="panel-scripts" class="panel">
+          <div class="panel-header">
+            <h2>Kịch bản câu hỏi thường gặp Q&A (0 credit)</h2>
+            <button class="btn" onclick="showAddScriptModal()">+ Thêm Kịch bản cứng</button>
+          </div>
+          <table class="data-table" id="scripts-table">
+            <thead>
+              <tr>
+                <th>Mẫu regex khớp câu hỏi</th>
+                <th>Nội dung trả lời</th>
+                <th>Ngôn ngữ</th>
+                <th>Ưu tiên</th>
+                <th>Chuyển người</th>
+                <th>Hành động</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- Dynamic -->
+            </tbody>
+          </table>
+        </section>
+
+        <!-- Panel 7: Credit balance ledger -->
+        <section id="panel-credits" class="panel">
+          <div class="panel-header">
+            <h2>Sổ cái credit sử dụng (Kiểm toán)</h2>
+          </div>
+          <table class="data-table" id="ledger-table">
+            <thead>
+              <tr>
+                <th>Mã giao dịch</th>
+                <th>Loại hành động</th>
+                <th>Credit tiêu dùng</th>
+                <th>LLM Model</th>
+                <th>Tokens sử dụng</th>
+                <th>Thời gian</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- Dynamic -->
+            </tbody>
+          </table>
+        </section>
+
+        <!-- Panel 8: Bot settings configuration -->
+        <section id="panel-settings" class="panel">
+          <div class="panel-header">
+            <h2>Cấu hình bộ hẹn giờ và giờ làm việc</h2>
+          </div>
+          <form id="settings-form" class="card form-grid">
+            <div class="form-group">
+              <label>Tự động trả về Bot khi operator im lặng</label>
+              <select id="set-auto-return" class="form-control">
+                <option value="true">Bật (Bật tự động)</option>
+                <option value="false">Tắt</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Thời gian operator im lặng tối đa (Phút)</label>
+              <input type="number" id="set-timeout" class="form-control" value="10">
+            </div>
+            <div class="form-group">
+              <label>Hành động khi hết giờ trực</label>
+              <select id="set-timeout-action" class="form-control">
+                <option value="bot_tiep">Bot trả lời tiếp tục</option>
+                <option value="chuyen_nguoi_khac">Chuyển sang operator khác</option>
+                <option value="de_cho">Cứ để hàng chờ</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Thông báo khách hàng khi chuyển giao</label>
+              <select id="set-alert-client" class="form-control">
+                <option value="true">Có thông báo</option>
+                <option value="false">Tráo lặng lẽ</option>
+              </select>
+            </div>
+            <button type="submit" class="btn" style="grid-column: span 2; margin-top: 10px;">Lưu cấu hình Bot</button>
+          </form>
+
+          <!--
+            Kết nối cửa hàng & bot Telegram.
+
+            Hai giá trị này trước đây chỉ sửa được bằng lệnh SQL tay. Thiếu
+            `medusa_base_url` thì bot không tra được hàng, không thêm được giỏ,
+            không chốt được đơn — mà giao diện không hề báo gì.
+
+            Token bot cố tình KHÔNG hiển thị lại: chỉ cho biết đã có hay chưa.
+            Để trống ô token = giữ nguyên token cũ, không phải xoá.
+          -->
+          <div class="card" style="margin-top: 30px; padding: 20px;">
+            <h3>Kết nối cửa hàng & Telegram</h3>
+            <form id="cau-hinh-shop-form" class="form-grid" style="margin-top: 15px;">
+              <div class="form-group" style="grid-column: span 2;">
+                <label>Địa chỉ Medusa (backend cửa hàng)</label>
+                <input type="text" id="ch-medusa-url" class="form-control"
+                       placeholder="http://backend-farmersmarket:9000">
+                <small class="muted">Bot dùng địa chỉ này để tra hàng, thêm giỏ và chốt đơn.</small>
+              </div>
+              <div class="form-group">
+                <label>Tên bot Telegram (không có @)</label>
+                <input type="text" id="ch-tg-username" class="form-control" placeholder="aichatcrm_bot">
+              </div>
+              <div class="form-group">
+                <label>Token bot Telegram</label>
+                <input type="password" id="ch-tg-token" class="form-control" placeholder="Để trống = giữ nguyên">
+                <small class="muted" id="ch-tg-trang-thai"></small>
+              </div>
+              <div id="ch-thong-bao" style="grid-column: span 2; display:none; padding:10px 12px; border-radius:6px; font-size:13px;"></div>
+              <button type="submit" class="btn" style="grid-column: span 2; margin-top: 10px;">Lưu kết nối</button>
+            </form>
+          </div>
+
+          <!-- Change Password Section -->
+          <div class="card" style="margin-top: 30px; padding: 20px;">
+            <h3>Đổi mật khẩu tài khoản</h3>
+            <form id="change-password-form" class="form-grid" style="margin-top: 15px;">
+              <div class="form-group">
+                <label>Mật khẩu hiện tại</label>
+                <input type="password" id="change-pwd-current" class="form-control" required>
+              </div>
+              <div class="form-group">
+                <label>Mật khẩu mới</label>
+                <input type="password" id="change-pwd-new" class="form-control" required>
+              </div>
+              <button type="submit" class="btn" style="grid-column: span 2; margin-top: 10px;">Cập nhật mật khẩu</button>
+            </form>
+          </div>
+        </section>
+
+        <!-- panel-conversations -->
+        <section id="panel-conversations" class="panel">
+          <div class="panel-header">
+            <h2>Lịch sử Chat & Cuộc hội thoại</h2>
+            <p class="muted">Theo dõi lịch sử tư vấn bán hàng của AI Chatbot và trạng thái tiếp quản.</p>
+          </div>
+          <div class="card">
+            <div class="table-responsive">
+              <table id="conversations-table" class="table">
+                <thead>
+                  <tr>
+                    <th>Khách hàng (Visitor)</th>
+                    <th>Chế độ (Mode)</th>
+                    <th>Mã giỏ hàng</th>
+                    <th>Thời gian chat cuối</th>
+                    <th>Hành động</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <!-- Dynamically populated -->
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+      </div>
+    </main>
+  </div>
+
+  <!-- Modals -->
+  <!-- Create Tenant Modal -->
+  <div id="modal-create-tenant" class="modal">
+    <div class="modal-content">
+      <span class="close-modal" onclick="hideCreateTenantModal()">&times;</span>
+      <h3>Đăng ký Tenant (Cửa hàng/Website mới)</h3>
+      <form id="create-tenant-form" style="margin-top: 15px;">
+        <div class="form-group">
+          <label>Tên Website/Shop</label>
+          <input type="text" id="tenant-name-input" class="form-control" required>
+        </div>
+        <div class="form-group" style="margin-top: 10px;">
+          <label>Ngành nghề</label>
+          <select id="tenant-nganh-input" class="form-control">
+            <option value="thuc_pham">Thực phẩm lên men (Tự động bật Tường lửa)</option>
+            <option value="wellness">Y tế & Sức khỏe (Tự động bật Tường lửa)</option>
+            <option value="my_pham">Mỹ phẩm (Tự động bật Tường lửa)</option>
+            <option value="thoi_trang">Thời trang & May mặc</option>
+            <option value="dien_tu">Thiết bị Điện tử</option>
+            <option value="khac">Khác</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-top: 10px;">
+          <label>Bậc dữ liệu (Data level)</label>
+          <select id="tenant-level-input" class="form-control">
+            <option value="0">Bậc 0 (Kịch bản + File nạp)</option>
+            <option value="1">Bậc 1 (+ Crawl web)</option>
+            <option value="2">Bậc 2 (+ Tồn kho Hệ thống/Shopify)</option>
+            <option value="3">Bậc 3 (+ AI Core vận hành)</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-top: 10px;">
+          <label>Credit tặng ban đầu</label>
+          <input type="number" id="tenant-credits-input" class="form-control" value="1000">
+        </div>
+        <button type="submit" class="btn" style="margin-top: 15px; width: 100%;">Tạo Tenant</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Add Operator Modal -->
+  <div id="modal-add-operator" class="modal">
+    <div class="modal-content">
+      <span class="close-modal" onclick="hideAddOperatorModal()">&times;</span>
+      <h3>Thêm Nhân viên trực chat</h3>
+      <form id="add-operator-form" style="margin-top: 15px;">
+        <div class="form-group">
+          <label>Tên nhân viên</label>
+          <input type="text" id="operator-name-input" class="form-control" required>
+        </div>
+        <div class="form-group" style="margin-top: 10px;">
+          <label>Telegram ID</label>
+          <input type="text" id="operator-tgid-input" class="form-control" required>
+        </div>
+        <button type="submit" class="btn" style="margin-top: 15px; width: 100%;">Thêm Nhân viên</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Add Script Modal -->
+  <div id="modal-add-script" class="modal">
+    <div class="modal-content">
+      <span class="close-modal" onclick="hideAddScriptModal()">&times;</span>
+      <h3>Thêm Kịch bản cứng Q&A</h3>
+      <form id="add-script-form" style="margin-top: 15px;">
+        <div class="form-group">
+          <label>Mẫu regex khớp câu hỏi</label>
+          <input type="text" id="script-regex-input" class="form-control" placeholder="Ví dụ: ^chào|hello" required>
+          <!--
+            Bẫy hay gặp: PostgreSQL dùng regex kiểu ARE, ranh giới từ là `\y`
+            chứ KHÔNG phải `\b`. Viết `\bgiá\b` thì kịch bản không bao giờ khớp
+            — và không có lỗi nào báo ra.
+          -->
+          <small class="muted">Ranh giới từ trong PostgreSQL là <code>\y</code>, không phải <code>\b</code>.</small>
+        </div>
+        <div class="form-group" style="margin-top: 10px;">
+          <label>Nội dung trả lời</label>
+          <textarea id="script-reply-input" class="form-control" rows="3" required></textarea>
+        </div>
+        <div class="form-group" style="margin-top: 10px;">
+          <label>Ngôn ngữ</label>
+          <select id="script-locale-input" class="form-control">
+            <option value="vi-VN">Tiếng Việt (vi-VN)</option>
+            <option value="en-US">Tiếng Anh (en-US)</option>
+          </select>
+        </div>
+        <div class="form-group" style="margin-top: 10px;">
+          <label>Độ ưu tiên</label>
+          <input type="number" id="script-priority-input" class="form-control" value="0">
+        </div>
+        <!--
+          Cờ này quyết định hội thoại có thật sự sang người trực hay không.
+          Câu trả lời hứa "em chuyển anh/chị tới nhân viên" mà không tick thì
+          hội thoại vẫn ở chế độ BOT — khách ngồi chờ một người không bao giờ
+          tới. Xem migration 004.
+        -->
+        <div class="form-group" style="margin-top: 14px; display:flex; align-items:flex-start; gap:10px;">
+          <input type="checkbox" id="script-chuyen-nguoi-input" style="width:16px; height:16px; margin-top:2px;">
+          <label for="script-chuyen-nguoi-input" style="margin:0; cursor:pointer; font-weight:normal;">
+            <strong>Chuyển sang nhân viên trực</strong><br>
+            <small class="muted">Tick khi câu trả lời có hứa chuyển người. Không tick thì bot vẫn giữ hội thoại và khách chờ vô ích.</small>
+          </label>
+        </div>
+        <button type="submit" class="btn" style="margin-top: 15px; width: 100%;">Lưu Kịch bản</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- Login Screen Overlay -->
+  <div id="login-screen" class="login-overlay">
+    <!-- 1. Login Card -->
+    <div id="card-login" class="login-card">
+      <div class="brand-logo">VPH</div>
+      <h2>Đăng nhập VPH AI ChatBot Panel</h2>
+      <form id="login-form" style="margin-top: 20px;">
+        <div class="form-group">
+          <label>Tài khoản</label>
+          <input type="text" id="login-username" class="form-control" placeholder="Tên đăng nhập" required>
+        </div>
+        <div class="form-group" style="margin-top: 15px;">
+          <label>Mật khẩu</label>
+          <input type="password" id="login-password" class="form-control" placeholder="Mật khẩu" required>
+        </div>
+        <div id="login-error" class="login-error-msg" style="display: none;">Tài khoản hoặc mật khẩu không chính xác!</div>
+        <div style="margin-top: 15px; text-align: right;">
+          <a href="#" onclick="showForgotCard(event)" style="font-size: 12px; color: var(--primary-color); text-decoration: none;">Quên mật khẩu?</a>
+        </div>
+        <button type="submit" class="btn" style="margin-top: 20px; width: 100%;">Đăng nhập</button>
+      </form>
+    </div>
+
+    <!-- 2. Forgot Password Card -->
+    <div id="card-forgot" class="login-card" style="display: none;">
+      <div class="brand-logo">VPH</div>
+      <h2>Khôi phục mật khẩu</h2>
+      <form id="forgot-form" style="margin-top: 20px;">
+        <div class="form-group">
+          <label>Địa chỉ Email</label>
+          <input type="email" id="forgot-email" class="form-control" placeholder="email@address.com" required>
+        </div>
+        <div id="forgot-message" style="display: none; color: #10b981; font-size: 12.5px; margin-top: 10px; text-align: left;"></div>
+        <div id="forgot-error" class="login-error-msg" style="display: none;"></div>
+        <div style="margin-top: 15px; text-align: left;">
+          <a href="#" onclick="showLoginCard(event)" style="font-size: 12px; color: var(--text-muted); text-decoration: none;">&larr; Quay lại đăng nhập</a>
+        </div>
+        <button type="submit" class="btn" style="margin-top: 20px; width: 100%;">Gửi yêu cầu reset</button>
+      </form>
+    </div>
+
+    <!-- 3. Reset Password Card -->
+    <div id="card-reset" class="login-card" style="display: none;">
+      <div class="brand-logo">VPH</div>
+      <h2>Đặt lại mật khẩu mới</h2>
+      <form id="reset-form" style="margin-top: 20px;">
+        <div class="form-group">
+          <label>Mật khẩu mới</label>
+          <input type="password" id="reset-new-password" class="form-control" placeholder="Nhập mật khẩu mới" required>
+        </div>
+        <div id="reset-message" style="display: none; color: #10b981; font-size: 12.5px; margin-top: 10px; text-align: left;"></div>
+        <div id="reset-error" class="login-error-msg" style="display: none;"></div>
+        <button type="submit" class="btn" style="margin-top: 20px; width: 100%;">Cập nhật mật khẩu mới</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- View Messages Modal -->
+  <div id="modal-view-messages" class="modal">
+    <div class="modal-content" style="max-width: 650px; display: flex; flex-direction: column; max-height: 85vh;">
+      <span class="close-modal" onclick="hideViewMessagesModal()">&times;</span>
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; padding-right: 25px;">
+        <h3 style="margin: 0;">Chi tiết cuộc hội thoại</h3>
+        <button id="btn-release-bot" class="btn btn-secondary" style="font-size: 12px; padding: 6px 12px; background: #0f766e; color: white;" onclick="releaseToBot()">🤖 Bàn giao lại cho Bot</button>
+      </div>
+      <div id="chat-messages-container" style="flex: 1; overflow-y: auto; margin-top: 5px; padding: 15px; border: 1px solid #e2e8f0; border-radius: 6px; display: flex; flex-direction: column; gap: 10px; background: #f8fafc; max-height: 50vh;">
+        <!-- Dynamically populated -->
+      </div>
+      <div style="margin-top: 15px; display: flex; gap: 10px;">
+        <input type="text" id="operator-reply-input" class="form-control" placeholder="Nhập tin nhắn trả lời khách hàng..." onkeydown="if(event.key==='Enter') sendOperatorReply()">
+        <button class="btn" style="white-space: nowrap;" onclick="sendOperatorReply()">Gửi tin nhắn</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Import CSV Language Modal -->
+  <div id="modal-import-csv-lang" class="modal">
+    <div class="modal-content" style="max-width: 550px;">
+      <span class="close-modal" onclick="hideImportCsvModal()">&times;</span>
+      <h3 data-i18n="import_csv_title">Nhập Ngôn ngữ mới từ File CSV</h3>
+      <p class="muted" style="font-size: 13px; margin-bottom: 15px;" data-i18n="import_csv_desc">
+        Tải lên hoặc dán nội dung CSV chứa các cặp khóa bản dịch (key, translation) để mở rộng ngôn ngữ giao diện.
+      </p>
+      
+      <form id="form-import-csv-lang" onsubmit="handleImportCsvSubmit(event)">
+        <div class="form-group" style="margin-bottom: 12px;">
+          <label style="font-weight: 500; font-size: 13px;" data-i18n="import_csv_lang_code">Mã ngôn ngữ (ví dụ: ja, fr, zh, es, ko):</label>
+          <input type="text" id="import-lang-code" class="form-control" placeholder="ja" required style="margin-top: 4px;">
+        </div>
+
+        <div class="form-group" style="margin-bottom: 12px;">
+          <label style="font-weight: 500; font-size: 13px;" data-i18n="import_csv_lang_name">Tên hiển thị (ví dụ: Japanese - 日本語):</label>
+          <input type="text" id="import-lang-name" class="form-control" placeholder="Japanese (日本語)" required style="margin-top: 4px;">
+        </div>
+
+        <div class="form-group" style="margin-bottom: 12px;">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <label style="font-weight: 500; font-size: 13px;" data-i18n="import_csv_content_label">Nội dung CSV (hoặc kéo thả file CSV vào đây):</label>
+            <a href="#" onclick="VPH_i18n.downloadSampleCSV(); return false;" style="font-size: 12px; color: #0d9488; text-decoration: none;" data-i18n="import_csv_sample_link">📋 Tải file CSV mẫu (Template)</a>
+          </div>
+          <textarea id="import-csv-text" class="form-control" rows="6" placeholder="key,translation&#10;nav_overview,Panoramica&#10;btn_send_msg,Invia messaggio..." required></textarea>
+        </div>
+
+        <div id="import-csv-error" class="login-error-msg" style="display: none; margin-bottom: 10px;"></div>
+
+        <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 15px;">
+          <button type="button" class="btn btn-secondary" onclick="hideImportCsvModal()" data-i18n="btn_close">Đóng</button>
+          <button type="submit" class="btn" data-i18n="btn_confirm_import">Nhập & Áp dụng Ngôn ngữ</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script src="i18n.js"></script>
+  <script src="admin.js"></script>
+</body>
+</html>
