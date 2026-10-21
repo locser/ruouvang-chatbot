@@ -5,8 +5,8 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/index.js",
-    "dev": "nodemon src/index.ts",
+    "start": "node dist/db/migrate.js && node dist/index.js",
+    "dev": "npm run migrate && nodemon src/index.ts",
     "worker": "ts-node src/worker.ts",
     "test": "jest",
     "test:legacy": "ts-node src/run-tests.ts",
