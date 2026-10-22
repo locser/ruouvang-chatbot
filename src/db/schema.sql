@@ -199,6 +199,40 @@ CREATE TABLE admin_user (
   tao_luc         timestamptz NOT NULL DEFAULT now()
 );
 
+-- Lệnh vận hành Telegram: lưu trạng thái để xác nhận một lần và truy vết ai đã làm gì.
+CREATE TABLE telegram_operator_action (
+  id                    uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id             uuid NOT NULL REFERENCES tenant(id) ON DELETE CASCADE,
+  telegram_chat_id      text NOT NULL,
+  telegram_message_id   text,
+  requested_by          text NOT NULL,
+  confirmed_by          text,
+  action_type           text NOT NULL CHECK (action_type IN ('inventory_adjust', 'create_product', 'inventory_lookup')),
+  status                text NOT NULL DEFAULT 'awaiting_confirmation'
+                        CHECK (status IN ('awaiting_selection', 'awaiting_confirmation', 'executing', 'completed', 'cancelled', 'failed', 'expired')),
+  payload               jsonb NOT NULL DEFAULT '{}'::jsonb,
+  original_text         text NOT NULL DEFAULT '',
+  result                jsonb,
+  error                 text,
+  expires_at            timestamptz NOT NULL DEFAULT (now() + interval '15 minutes'),
+  created_at            timestamptz NOT NULL DEFAULT now(),
+  updated_at            timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX telegram_operator_action_pending_idx
+  ON telegram_operator_action (tenant_id, status, expires_at);
+CREATE UNIQUE INDEX telegram_operator_action_message_uq
+  ON telegram_operator_action (tenant_id, telegram_chat_id, telegram_message_id)
+  WHERE telegram_message_id IS NOT NULL;
+CREATE OR REPLACE FUNCTION telegram_operator_action_touch() RETURNS trigger AS $$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TRIGGER telegram_operator_action_touch
+  BEFORE UPDATE ON telegram_operator_action
+  FOR EACH ROW EXECUTE FUNCTION telegram_operator_action_touch();
+
 -- -----------------------------------------------------------------------------
 -- ROW LEVEL SECURITY (RLS) POLICIES
 -- -----------------------------------------------------------------------------
@@ -215,6 +249,7 @@ ALTER TABLE kb_script         ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tenant_setting    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE credit_balance    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE credit_ledger     ENABLE ROW LEVEL SECURITY;
+ALTER TABLE telegram_operator_action ENABLE ROW LEVEL SECURITY;
 
 ALTER TABLE tenant            FORCE ROW LEVEL SECURITY;
 ALTER TABLE tenant_key        FORCE ROW LEVEL SECURITY;
@@ -229,6 +264,7 @@ ALTER TABLE kb_script         FORCE ROW LEVEL SECURITY;
 ALTER TABLE tenant_setting    FORCE ROW LEVEL SECURITY;
 ALTER TABLE credit_balance    FORCE ROW LEVEL SECURITY;
 ALTER TABLE credit_ledger     FORCE ROW LEVEL SECURITY;
+ALTER TABLE telegram_operator_action FORCE ROW LEVEL SECURITY;
 
 -- Policy to isolate data based on database setting: app.tenant_id
 CREATE POLICY tenant_iso ON tenant USING (id = current_setting('app.tenant_id', true)::uuid);
@@ -270,6 +306,10 @@ CREATE POLICY tenant_iso ON kb_script
   WITH CHECK (tenant_id = current_setting('app.tenant_id', true)::uuid);
 
 CREATE POLICY tenant_iso ON tenant_setting
+  USING      (tenant_id = current_setting('app.tenant_id', true)::uuid)
+  WITH CHECK (tenant_id = current_setting('app.tenant_id', true)::uuid);
+
+CREATE POLICY tenant_iso ON telegram_operator_action
   USING      (tenant_id = current_setting('app.tenant_id', true)::uuid)
   WITH CHECK (tenant_id = current_setting('app.tenant_id', true)::uuid);
 
@@ -319,3 +359,28 @@ ALTER TABLE app_settings FORCE  ROW LEVEL SECURITY;
 CREATE POLICY tenant_iso ON app_settings
   USING      (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
   WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+
+-- 008: Khách để lại số điện thoại cho nhân viên gọi tư vấn (xem migrations/008_khach_tiem_nang.sql)
+CREATE TABLE khach_tiem_nang (
+  id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  tenant_id        uuid NOT NULL REFERENCES tenant(id) ON DELETE CASCADE,
+  conversation_id  uuid NOT NULL REFERENCES conversation(id) ON DELETE CASCADE,
+  ten              text,
+  so_dien_thoai    text NOT NULL,
+  nhu_cau          text,
+  trang_thai       text NOT NULL DEFAULT 'moi' CHECK (trang_thai IN ('moi', 'da_goi', 'bo_qua')),
+  da_bao_nhan_vien boolean NOT NULL DEFAULT false,
+  da_dong_bo_backend boolean NOT NULL DEFAULT false,
+  tao_luc          timestamptz NOT NULL DEFAULT now(),
+  cap_nhat_luc     timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (conversation_id)
+);
+CREATE INDEX khach_tiem_nang_tenant_idx ON khach_tiem_nang (tenant_id, trang_thai, tao_luc DESC);
+ALTER TABLE khach_tiem_nang ENABLE ROW LEVEL SECURITY;
+ALTER TABLE khach_tiem_nang FORCE  ROW LEVEL SECURITY;
+CREATE POLICY tenant_iso ON khach_tiem_nang
+  USING      (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.tenant_id', true), '')::uuid);
+
+CREATE INDEX khach_tiem_nang_chua_dong_bo_idx ON khach_tiem_nang (tao_luc) WHERE da_dong_bo_backend = false;

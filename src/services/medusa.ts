@@ -376,6 +376,19 @@ export async function medusaTraCuuDonHang(
   return await res.json();
 }
 
+/** Đẩy khách tiềm năng sang backend để lưu. Upsert theo conversation_id nên gọi lại an toàn. */
+export async function medusaLuuKhachTiemNang(
+  config: MedusaConfig,
+  lead: { conversation_id: string; phone: string; name?: string | null; need?: string | null }
+): Promise<void> {
+  const res = await fetch(`${config.baseUrl}/ai/leads`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "x-ai-secret-key": AI_SECRET_KEY },
+    body: JSON.stringify(lead),
+  });
+  if (!res.ok) throw new Error(`Lưu khách tiềm năng thất bại: ${res.status} ${await res.text()}`);
+}
+
 /**
  * Intelligently detects Medusa queries from user message text.
  */

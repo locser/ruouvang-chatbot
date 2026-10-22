@@ -137,7 +137,7 @@ Migration: `npm run migrate` (host: `CONFIG_LOCAL_MODE=1 npm run migrate`; `-- -
 
 | Phạm vi | Khoá |
 |---|---|
-| Nền tảng (super_admin) | `deepseek_api_key`🔒 `smtp_host` `smtp_port` `smtp_user` `smtp_pass`🔒 `smtp_from` `telegram_bot_token`🔒 `telegram_webhook_secret`🔒 |
+| Nền tảng (super_admin) | `deepseek_api_key`🔒 `vision_api_base_url` `vision_api_key`🔒 `vision_model` `smtp_host` `smtp_port` `smtp_user` `smtp_pass`🔒 `smtp_from` `telegram_bot_token`🔒 `telegram_webhook_secret`🔒 |
 | Theo shop | `widget_key` |
 
 🔒 = mã hoá AES-256-GCM, API chỉ trả bản che. Danh sách đầy đủ: `GET /v1/admin/settings/schema`.
@@ -160,6 +160,29 @@ GET    /v1/public/config?tenant_id=<uuid>                    # công khai, hiệ
 `generate`: `type` ∈ hex, base64, base64url, uuid, password, jwt_secret, encryption_key, api_key, widget_key. `save_as` lưu thẳng vào DB; với `widget_key` còn đăng ký sha256 vào `tenant_key`.
 
 CLI tương đương (`npm run settings -- …`): `list`, `get`, `set`, `unset`, `schema`, `gen <loai> [--bytes N] [--save-as khoa]`, `import-env [--file ../.env] [--dry-run]` (nhập một lần từ `.env` cũ).
+
+### Trợ lý vận hành trong group Telegram
+
+Hướng dẫn bật từ đầu trên Web Admin: [`SETUP-TELEGRAM-AI.md`](./SETUP-TELEGRAM-AI.md).
+
+Nhân viên phải có `telegram_id` trong tài khoản admin của đúng shop. Trong group,
+gọi bot bằng `/ops` hoặc `@username_bot`; bot chỉ lập thao tác dự kiến và luôn
+yêu cầu bấm **Xác nhận** trước khi ghi Medusa. Ví dụ:
+
+```text
+/ops Chateau Margaux 2018 mới nhập thêm 30 chai
+/ops kiểm tra kho Penfolds Bin 389
+/ops tạo sản phẩm mới Example Cabernet 2022 giá 1200000
+```
+
+Có thể gửi ảnh nhãn chai kèm caption `/ops mới nhập thêm 30 chai`. Tính năng ảnh
+cần đặt đủ `vision_api_base_url`, `vision_api_key`, `vision_model` cho một API
+tương thích OpenAI có hỗ trợ `image_url`. Ảnh được tải từ Telegram vào bộ nhớ,
+gửi dạng data URL cho nhà cung cấp vision và không lưu làm ảnh sản phẩm. Với
+privacy mode mặc định của Telegram, nên luôn dùng `/ops` hoặc mention trong caption.
+
+Mỗi lệnh hết hạn sau 15 phút, có audit người yêu cầu/người xác nhận và khóa
+idempotency theo Telegram message để webhook gửi lại không làm cộng kho hai lần.
 
 ### Bước 1 — Khởi động hạ tầng
 
@@ -214,6 +237,8 @@ Giao diện:
 | 8 | "Cái này chữa tiểu đường được không?" | Claim Guard chặn, chuyển nhân viên |
 | 9 | Nhân viên tiếp quản qua Telegram và trả lời | Khách nhận được tin |
 | 10 | Hội thoại 25 lượt | Bot vẫn nhớ địa chỉ đã cho |
+| 11 | `/ops <tên chai> mới nhập thêm 30 chai` trong group | Bot cho chọn đúng SKU, chỉ cộng sau khi bấm xác nhận; bấm lại không cộng lần hai |
+| 12 | Gửi ảnh chai + caption `/ops mới nhập thêm 30 chai` | Bot đọc nhãn, đối chiếu catalog và hỏi xác nhận |
 
 Bước 3, 4, 6 là ba sự cố đã xảy ra thật. Chúng ở đây vĩnh viễn.
 

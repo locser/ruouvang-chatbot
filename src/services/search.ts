@@ -202,7 +202,11 @@ export async function timSanPham(tenantId: string, p: ThamSoTimKiem): Promise<Ke
   }
 
   // --- Bậc 3: chỉ giữ tenant + từ khoá ---
-  kq = await chay([`tenant_id = ${nhayKep(tenantId)}`, "in_stock = true"]);
+  const locBac3 = [`tenant_id = ${nhayKep(tenantId)}`];
+  // Luồng khách mặc định chỉ gợi ý hàng còn bán. Luồng nhân viên nhập kho gọi
+  // in_stock_only=false và phải tìm được cả SKU đang bằng 0 để cộng hàng.
+  if (p.in_stock_only !== false) locBac3.push("in_stock = true");
+  kq = await chay(locBac3);
   return {
     products: kq.hits,
     total_found: kq.total,

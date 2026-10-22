@@ -1113,6 +1113,54 @@
     box.style.border = `1px solid ${thanhCong ? '#a7f3d0' : '#fecaca'}`;
   }
 
+  function datChecklist(id, ok, noiDung) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.innerHTML = `${ok ? '✅' : '⚠️'} ${escapeHtml(noiDung)}`;
+    el.style.color = ok ? '#047857' : '#b45309';
+  }
+
+  async function docJsonWebhook(res) {
+    const noiDung = await res.text();
+    try {
+      return JSON.parse(noiDung);
+    } catch {
+      throw new Error(
+        'Chatbot API trả về HTML thay vì JSON. Hãy mở Admin từ đúng service chatbot và chỉ nhập domain HTTPS, không nhập đường dẫn /v1/tg/webhook/…'
+      );
+    }
+  }
+
+  async function kiemTraTelegramWebhook(imLang = false) {
+    if (!currentTenant) return;
+    datChecklist('ch-check-webhook', false, 'Đang kiểm tra webhook Telegram…');
+    try {
+      const res = await fetch(`/v1/admin/tenants/${currentTenant.id}/telegram-webhook`, { headers: getHeaders() });
+      const d = await docJsonWebhook(res);
+      if (!res.ok) {
+        datChecklist('ch-check-webhook', false, d.error || 'Webhook chưa hoạt động');
+        if (!imLang) baoCauHinh(d.error || 'Không kiểm tra được webhook.', false);
+        return;
+      }
+      const dungUrl = Boolean(d.webhook_matches_tenant);
+      const ok = d.bot_ok && dungUrl && !d.last_error_message;
+      datChecklist(
+        'ch-check-webhook',
+        ok,
+        ok
+          ? `Webhook đang hoạt động${d.pending_update_count ? ` · ${d.pending_update_count} tin đang chờ` : ''}`
+          : d.last_error_message || (d.webhook_url ? 'Webhook đang trỏ sai URL' : 'Webhook chưa được đăng ký')
+      );
+      if (!imLang) baoCauHinh(
+        ok ? `Kết nối Telegram tốt. Bot @${d.username} sẵn sàng nhận /ops.` : 'Kết nối Telegram chưa hoàn chỉnh.',
+        ok
+      );
+    } catch (e) {
+      datChecklist('ch-check-webhook', false, 'Không gọi được API kiểm tra webhook');
+      if (!imLang) baoCauHinh('Lỗi mạng: ' + e.message, false);
+    }
+  }
+
   async function taiCauHinhShop() {
     if (!currentTenant) return;
     const oUrl = document.getElementById('ch-medusa-url');
@@ -1125,6 +1173,20 @@
       oUrl.value = d.medusa_base_url || '';
       document.getElementById('ch-tg-username').value = d.telegram_bot_username || '';
       document.getElementById('ch-tg-token').value = '';
+      document.getElementById('ch-public-url').value = d.public_base_url || '';
+      datChecklist('ch-check-bot', Boolean(d.co_bot_token), d.co_bot_token ? 'Đã lưu token bot' : 'Chưa lưu token bot');
+      datChecklist(
+        'ch-check-staff',
+        Number(d.so_nhan_vien_telegram || 0) > 0,
+        Number(d.so_nhan_vien_telegram || 0) > 0
+          ? `${Number(d.so_nhan_vien_telegram)} nhân viên đã liên kết Telegram ID`
+          : 'Chưa có nhân viên liên kết Telegram ID'
+      );
+      datChecklist(
+        'ch-check-vision',
+        Boolean(d.vision_ready),
+        d.vision_ready ? 'Vision đã sẵn sàng đọc ảnh chai' : 'Chưa cấu hình đủ Vision API trong Cấu hình hệ thống'
+      );
 
       // Token không bao giờ hiện lại — chỉ nói rõ đang có hay chưa, để người
       // dùng biết ô trống nghĩa là "giữ nguyên" chứ không phải "chưa có".
@@ -1143,10 +1205,54 @@
           false
         );
       }
+      if (d.co_bot_token) await kiemTraTelegramWebhook(true);
+      else datChecklist('ch-check-webhook', false, 'Lưu token trước khi đăng ký webhook');
     } catch (e) {
       console.error('[CauHinhShop] tải lỗi:', e);
     }
   }
+
+  const nutDangKyWebhook = document.getElementById('ch-dang-ky-webhook');
+  if (nutDangKyWebhook) {
+    nutDangKyWebhook.addEventListener('click', async () => {
+      if (!currentTenant) return;
+      const oPublicUrl = document.getElementById('ch-public-url');
+      const publicUrlDaNhap = oPublicUrl.value.trim();
+      if (!publicUrlDaNhap) return baoCauHinh('Cần nhập URL HTTPS công khai của Chatbot API.', false);
+
+      // Người vận hành thường dán URL webhook đầy đủ lấy từ Telegram. API chỉ
+      // cần origin để tự ghép đúng tenant_id; tự chuẩn hoá để không tạo đường
+      // dẫn lặp /v1/tg/webhook/.../v1/tg/webhook/....
+      let publicBaseUrl;
+      try {
+        const u = new URL(publicUrlDaNhap);
+        if (u.protocol !== 'https:') throw new Error('not https');
+        publicBaseUrl = u.origin;
+        oPublicUrl.value = publicBaseUrl;
+      } catch {
+        return baoCauHinh('URL phải là HTTPS hợp lệ, ví dụ https://bot.example.com', false);
+      }
+      nutDangKyWebhook.disabled = true;
+      nutDangKyWebhook.textContent = 'Đang đăng ký…';
+      try {
+        const res = await fetch(`/v1/admin/tenants/${currentTenant.id}/telegram-webhook`, {
+          method: 'POST', headers: getHeaders(), body: JSON.stringify({ publicBaseUrl })
+        });
+        const d = await docJsonWebhook(res);
+        if (!res.ok) return baoCauHinh(d.error || 'Đăng ký webhook thất bại.', false);
+        baoCauHinh(d.message || 'Đã đăng ký webhook.', true);
+        await taiCauHinhShop();
+      } catch (e) {
+        baoCauHinh('Lỗi mạng: ' + e.message, false);
+      } finally {
+        nutDangKyWebhook.disabled = false;
+        nutDangKyWebhook.textContent = '2. Đăng ký webhook';
+      }
+    });
+  }
+
+  const nutKiemTraWebhook = document.getElementById('ch-kiem-tra-webhook');
+  if (nutKiemTraWebhook) nutKiemTraWebhook.addEventListener('click', () => kiemTraTelegramWebhook(false));
 
   const formCauHinh = document.getElementById('cau-hinh-shop-form');
   if (formCauHinh) {

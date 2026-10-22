@@ -25,6 +25,7 @@ export const TEN_TOOL_HOP_LE = [
   "checkout",
   "get_order_status",
   "escalate_to_human",
+  "save_lead",
 ] as const;
 
 export type TenTool = (typeof TEN_TOOL_HOP_LE)[number];
@@ -193,6 +194,41 @@ export function chuanHoaSoDienThoai(sdt: unknown): KetQuaKiemChung<string> {
       `SĐT không hợp lệ: ${sdt}`,
       "Dạ số điện thoại chưa đúng định dạng ạ. Anh/chị cho em xin lại số 10 chữ số giúp em nhé!"
     );
+  }
+  return { hopLe: true, duLieu: s };
+}
+
+/**
+ * SĐT khách tiềm năng — dễ hơn SĐT giao hàng, chỉ chặn số RÁC rõ ràng.
+ *
+ * Nhận số di động (03/05/07/08/09, 10 số) và số máy bàn (02x, 11 số), chịu được
+ * dấu cách, chấm, gạch, +84. Loại: sai độ dài/đầu số, và số khách gõ bừa như
+ * 0900000000 (lặp một chữ số), 0912345678 / 0987654321 (dãy tăng giảm dần),
+ * 0909090909 (lặp một cặp). Cố ý KHÔNG chặn số đẹp thật như 0988668866.
+ */
+export function chuanHoaSdtKhachTiemNang(sdt: unknown): KetQuaKiemChung<string> {
+  const tuChoiSdt = (lyDo: string) =>
+    tuChoi(
+      "SDT_KHONG_HOP_LE",
+      lyDo,
+      "Dạ số này em chưa ghi nhận được ạ. Nếu anh/chị tiện thì kiểm tra lại giúp em, còn không thì mình cứ tiếp tục nhé!"
+    );
+  if (typeof sdt !== "string") return tuChoiSdt("SĐT không phải chuỗi");
+
+  let s = sdt.replace(/[\s.\-()]/g, "");
+  if (s.startsWith("+84")) s = "0" + s.slice(3);
+  else if (s.startsWith("84") && s.length >= 11) s = "0" + s.slice(2);
+
+  if (!/^(0[35789]\d{8}|02\d{9})$/.test(s)) return tuChoiSdt(`Sai độ dài hoặc đầu số: ${sdt}`);
+
+  const phanSo = s.slice(2); // bỏ đầu số 0x để mẫu của nhà mạng không bị tính là "lặp"
+  if (/(\d)\1{5,}/.test(phanSo)) return tuChoiSdt("Lặp một chữ số quá nhiều");
+  if (/(\d\d)\1{2,}/.test(phanSo)) return tuChoiSdt("Lặp một cặp số (090909…)");
+  const tang = "0123456789";
+  const giam = "9876543210";
+  for (let i = 0; i + 6 <= s.length; i++) {
+    const doan = s.slice(i, i + 6);
+    if (tang.includes(doan) || giam.includes(doan)) return tuChoiSdt("Dãy số tăng/giảm dần");
   }
   return { hopLe: true, duLieu: s };
 }

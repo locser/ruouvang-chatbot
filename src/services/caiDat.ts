@@ -50,6 +50,9 @@ const toiDa = (n: number) => (v: string) => (v.length <= n ? null : `tối đa $
 export const DANH_SACH_CAI_DAT: KhaiBaoCaiDat[] = [
   // --- Toàn nền tảng ---
   { key: "deepseek_api_key", phamVi: "nen_tang", biMat: true, congKhai: false, moTa: "Khoá API DeepSeek cho chatbot", kiemTra: toiDa(300) },
+  { key: "vision_api_base_url", phamVi: "nen_tang", biMat: false, congKhai: false, moTa: "Base URL API vision tương thích OpenAI (ví dụ https://api.openai.com/v1)", kiemTra: (v) => (/^https:\/\//i.test(v) && v.length <= 500 ? null : "phải là URL https, tối đa 500 ký tự") },
+  { key: "vision_api_key", phamVi: "nen_tang", biMat: true, congKhai: false, moTa: "Khoá API cho mô hình đọc nhãn chai từ ảnh Telegram", kiemTra: toiDa(500) },
+  { key: "vision_model", phamVi: "nen_tang", biMat: false, congKhai: false, moTa: "Tên mô hình vision hỗ trợ image_url", kiemTra: toiDa(120) },
   { key: "smtp_host", phamVi: "nen_tang", biMat: false, congKhai: false, moTa: "Máy chủ SMTP gửi thư (đặt lại mật khẩu quản trị)", macDinh: "smtp.gmail.com", kiemTra: toiDa(255) },
   { key: "smtp_port", phamVi: "nen_tang", biMat: false, congKhai: false, moTa: "Cổng SMTP", macDinh: "587", kiemTra: laSo(1, 65535) },
   { key: "smtp_user", phamVi: "nen_tang", biMat: false, congKhai: false, moTa: "Tài khoản SMTP", kiemTra: toiDa(255) },

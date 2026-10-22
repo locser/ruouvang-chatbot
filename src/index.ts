@@ -5,6 +5,7 @@ import crypto from "crypto";
 import fs from "fs";
 import { env } from "./config/env";
 import { pool, runInTenantContext, runCentralAdmin } from "./db/client";
+import { dongBoKhachTiemNangTonDong } from "./services/dongBoKhachTiemNang";
 import { chayMigration } from "./db/migrate";
 import { matchHardScript, routeModel, sinhCauTraLoiStream, ChatMessage, MODEL_THUC_TE } from "./services/llm";
 import { botDangQuyDoi } from "./services/priceCheck";
@@ -15,8 +16,8 @@ import { documentQueue } from "./services/queues";
 import { taoVectorEmbedding } from "./services/embedding";
 // TỐI ƯU 08/2026 — tầng đệm ngữ cảnh cho luồng chat (tri thức RAG + kịch bản cứng).
 import { layTriThucCoDem, matchHardScriptCoDem } from "./services/ngucanhCache";
-import { sendTakeoverAlert, sendTelegramMessage, guiTinQuaBot, answerCallbackQuery, guiThongBaoDonMoi } from "./services/telegram";
-import { layBotCuaShop, layTatCaBot, BotShop } from "./services/telegramTenant";
+import { sendTakeoverAlert, sendTelegramMessage, guiTinQuaBot, answerCallbackQuery, guiThongBaoDonMoi, dangKyWebhookChoShop, layThongTinWebhook, layThongTinBot } from "./services/telegram";
+import { layBotCuaShop, layTatCaBot, xoaCacheBot, BotShop } from "./services/telegramTenant";
 import { verifyPassword, verifyTelegramSignature, hashPassword, hashPasswordAsync, verifyPasswordAsync } from "./services/auth";
 import { securityHeaders, soSanhAnToan, hanMucDangNhap, hanMucChatTheoIp, hanMucTaoPhien } from "./services/security";
 import { sendResetPasswordEmail } from "./services/email";
@@ -26,6 +27,8 @@ import { khachMuonChotDon, botHuaGuiQr } from "./services/checkoutIntent";
 import { chayOrchestrator, trangThaiMoi } from "./services/orchestrator";
 import { fetchJson } from "./services/http";
 import { routerCaiDat, routerCongKhai } from "./routes/caiDat";
+import { laYeuCauVanHanh, xuLyCallbackVanHanh, xuLyYeuCauVanHanh } from "./services/telegramOperator";
+import { layCaiDat } from "./services/caiDat";
 
 import { quetTiemLenh } from "./worker";
 import path from "path";
@@ -1189,6 +1192,11 @@ setInterval(async () => {
   }
 }, 30000);
 
+// Thử lại đẩy khách tiềm năng sang backend Medusa (lần trước lỗi). Không cần realtime.
+setInterval(() => {
+  dongBoKhachTiemNangTonDong().catch((err) => console.error("[DongBoLead Error]:", err));
+}, 120000);
+
 // -----------------------------------------------------------------------------
 // TELEGRAM INCOMING WEBHOOK — MỖI SHOP MỘT BOT
 // -----------------------------------------------------------------------------
@@ -1261,6 +1269,16 @@ app.post("/v1/tg/webhook/:tenant_id", async (req: Request, res: Response) => {
       const dataStr = String(callback_query.data);
       const operatorId = String(callback_query.from?.id || "");
 
+      if (dataStr.startsWith("ops_")) {
+        if (!(await laNhanVienCuaShop(tenantId, operatorId))) {
+          await answerCallbackQuery(bot, callback_query.id, "Bạn không có quyền vận hành shop này.", true);
+          return res.json({ ok: true });
+        }
+        if (await xuLyCallbackVanHanh(bot, tenantId, callback_query)) {
+          return res.json({ ok: true });
+        }
+      }
+
       if (dataStr.startsWith("takeover_")) {
         const conversationId = dataStr.replace("takeover_", "");
 
@@ -1304,10 +1322,29 @@ app.post("/v1/tg/webhook/:tenant_id", async (req: Request, res: Response) => {
     }
 
     // 2. Nhân viên gõ tin nhắn trả lời khách ngay trong Telegram (F-14)
-    if (message && message.text) {
+    if (message && (message.text || message.caption || message.photo?.length)) {
       const chatId = message.chat.id;
-      const text = String(message.text).trim();
+      const text = String(message.text || message.caption || "").trim();
       const operatorId = String(message.from?.id || "");
+
+      // Chế độ vận hành kho trong group/private chat. Tin nhắn chữ chỉ vào
+      // nhánh này khi có /ops, @mention hoặc reply bot; ảnh luôn lập bản nháp.
+      // Nhờ vậy không thể vô tình gửi một lệnh kho thành câu trả lời cho khách.
+      if (laYeuCauVanHanh(message, bot)) {
+        if (!operatorId || !(await laNhanVienCuaShop(tenantId, operatorId))) {
+          await guiTinQuaBot(bot, { chat_id: chatId, text: "⛔ Tài khoản Telegram này chưa được cấp quyền nhân viên của shop." });
+          return res.json({ ok: true });
+        }
+        try {
+          await xuLyYeuCauVanHanh(bot, tenantId, message);
+        } catch (e: any) {
+          await guiTinQuaBot(bot, {
+            chat_id: chatId,
+            text: `⚠️ ${String(e?.message || e).slice(0, 800)}`,
+          });
+        }
+        return res.json({ ok: true });
+      }
 
       if (text === "/start" || text === "/help") {
         const tenBot = bot.username ? `@${bot.username.replace(/^@/, "")}` : "bot của shop";
@@ -1315,7 +1352,8 @@ app.post("/v1/tg/webhook/:tenant_id", async (req: Request, res: Response) => {
           chat_id: chatId,
           text:
             `👋 *Chào mừng anh/chị đến với Telegram Console (${tenBot})!*\n\n` +
-            `Bot sẽ tự động gửi thông báo khi có khách hàng cần tiếp quản.`,
+            `Bot sẽ tự động gửi thông báo khi có khách hàng cần tiếp quản.\n` +
+            `Dùng /ops để xem cách tra kho, nhập kho hoặc tạo sản phẩm bằng AI.`,
           parse_mode: "Markdown",
         });
       } else if (operatorId && (await laNhanVienCuaShop(tenantId, operatorId))) {
@@ -1628,6 +1666,39 @@ app.delete("/v1/admin/tenants/:tid/scripts/:id", async (req: Request, res: Respo
   }
 });
 
+app.get("/v1/admin/tenants/:id/leads", requireAdminAuth, async (req: Request, res: Response) => {
+  const tenantId = req.params.id;
+  try {
+    const result = await pool.query(
+      `SELECT id, ten as name, so_dien_thoai as phone, nhu_cau as need, trang_thai as status,
+              conversation_id, tao_luc as time
+       FROM khach_tiem_nang WHERE tenant_id = $1 ORDER BY tao_luc DESC LIMIT 200`,
+      [tenantId]
+    );
+    res.json(result.rows);
+  } catch (error) {
+    console.error("Fetch leads error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.patch("/v1/admin/tenants/:tid/leads/:id", requireAdminAuth, async (req: Request, res: Response) => {
+  const { tid, id } = req.params;
+  const status = req.body?.status;
+  if (!["moi", "da_goi", "bo_qua"].includes(status)) {
+    return res.status(400).json({ error: "status phải là moi, da_goi hoặc bo_qua" });
+  }
+  try {
+    await runInTenantContext(tid, async (client) => {
+      await client.query("UPDATE khach_tiem_nang SET trang_thai = $3, cap_nhat_luc = now() WHERE id = $1 AND tenant_id = $2", [id, tid, status]);
+    });
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Update lead error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 app.get("/v1/admin/tenants/:id/ledgers", async (req: Request, res: Response) => {
   const tenantId = req.params.id;
   try {
@@ -1766,19 +1837,106 @@ app.get("/v1/admin/tenants/:id/conversations/:convId/messages", requireAdminAuth
 // -----------------------------------------------------------------------------
 app.get("/v1/admin/tenants/:id/cau-hinh", async (req: Request, res: Response) => {
   try {
-    const r = await pool.query(
+    const [r, nv, visionBase, visionKey, visionModel] = await Promise.all([
+      pool.query(
       `SELECT medusa_base_url, telegram_bot_username,
               (telegram_bot_token IS NOT NULL)   AS co_bot_token,
               (telegram_webhook_secret IS NOT NULL) AS co_webhook_secret
        FROM tenant_setting WHERE tenant_id = $1`,
       [req.params.id]
-    );
-    if (r.rows.length === 0) return res.json({ chua_co_cau_hinh: true });
+      ),
+      pool.query(
+        `SELECT count(DISTINCT au.id)::int AS n
+           FROM admin_user au
+          WHERE au.telegram_id IS NOT NULL AND au.telegram_id <> ''
+            AND (au.tenant_id = $1 OR EXISTS (
+              SELECT 1 FROM admin_user_tenant aut
+               WHERE aut.admin_user_id = au.id AND aut.tenant_id = $1
+            ))`,
+        [req.params.id]
+      ),
+      layCaiDat("vision_api_base_url"),
+      layCaiDat("vision_api_key"),
+      layCaiDat("vision_model"),
+    ]);
+    if (r.rows.length === 0) return res.json({
+      chua_co_cau_hinh: true,
+      public_base_url: env.APP_BASE_URL,
+      so_nhan_vien_telegram: Number(nv.rows[0]?.n || 0),
+      vision_ready: Boolean(visionBase && visionKey && visionModel),
+    });
     // KHÔNG trả token ra ngoài — chỉ cho biết đã có hay chưa.
-    return res.json(r.rows[0]);
+    return res.json({
+      ...r.rows[0],
+      public_base_url: env.APP_BASE_URL,
+      so_nhan_vien_telegram: Number(nv.rows[0]?.n || 0),
+      vision_ready: Boolean(visionBase && visionKey && visionModel),
+    });
   } catch (e) {
     console.error("[CauHinhShop] đọc lỗi:", e);
     return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+/** Trạng thái thực tế ở Telegram, không chỉ trạng thái đã lưu trong DB. */
+app.get("/v1/admin/tenants/:id/telegram-webhook", async (req: Request, res: Response) => {
+  const bot = await layBotCuaShop(req.params.id);
+  if (!bot) return res.status(409).json({ error: "Shop chưa lưu token bot Telegram." });
+  const [me, webhook] = await Promise.all([layThongTinBot(bot), layThongTinWebhook(bot)]);
+  const webhookUrl = webhook?.result?.url || "";
+  let webhookMatchesTenant = false;
+  try {
+    webhookMatchesTenant = new URL(webhookUrl).pathname === `/v1/tg/webhook/${req.params.id}`;
+  } catch { /* chưa có webhook */ }
+  return res.json({
+    bot_ok: Boolean(me?.ok),
+    username: me?.ok ? me.username : null,
+    bot_error: me?.ok ? null : me?.loi,
+    webhook_url: webhookUrl,
+    webhook_matches_tenant: webhookMatchesTenant,
+    pending_update_count: Number(webhook?.result?.pending_update_count || 0),
+    last_error_message: webhook?.result?.last_error_message || null,
+    expected_url: `${env.APP_BASE_URL.replace(/\/+$/, "")}/v1/tg/webhook/${req.params.id}`,
+  });
+});
+
+/** Đăng ký webhook ngay từ Admin — không còn bắt người dùng SSH chạy script. */
+app.post("/v1/admin/tenants/:id/telegram-webhook", async (req: Request, res: Response) => {
+  const tenantId = req.params.id;
+  const baseUrl = String(req.body?.publicBaseUrl || env.APP_BASE_URL || "").trim().replace(/\/+$/, "");
+  if (!baseUrl.startsWith("https://") || !isSafeUrl(baseUrl)) {
+    return res.status(400).json({ error: "URL công khai phải là https:// hợp lệ và truy cập được từ Internet." });
+  }
+
+  let bot = await layBotCuaShop(tenantId);
+  if (!bot) return res.status(409).json({ error: "Hãy lưu token bot Telegram trước." });
+
+  try {
+    let secret = bot.webhookSecret;
+    if (!secret || secret.length < 16) {
+      secret = crypto.randomBytes(32).toString("hex");
+      await runInTenantContext(tenantId, (client) => client.query(
+        `UPDATE tenant_setting SET telegram_webhook_secret=$2 WHERE tenant_id=$1`,
+        [tenantId, secret]
+      ));
+      xoaCacheBot(tenantId);
+      bot = await layBotCuaShop(tenantId);
+      if (!bot) throw new Error("Không đọc lại được cấu hình bot sau khi lưu secret.");
+    }
+
+    const me = await layThongTinBot(bot);
+    if (!me.ok) return res.status(400).json({ error: `Token bot không hợp lệ: ${me.loi}` });
+    const result = await dangKyWebhookChoShop(bot, baseUrl, secret);
+    if (!result.ok) return res.status(502).json({ error: result.loi || "Telegram từ chối đăng ký webhook." });
+    return res.json({
+      ok: true,
+      username: me.username,
+      webhook_url: result.url,
+      message: `Đã kết nối @${me.username} với shop. Bot có thể nhận /ops trong group.`,
+    });
+  } catch (e: any) {
+    console.error("[TelegramWebhookAdmin] đăng ký lỗi:", e);
+    return res.status(500).json({ error: String(e?.message || e).slice(0, 300) });
   }
 });
 

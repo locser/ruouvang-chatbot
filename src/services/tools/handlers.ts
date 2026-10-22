@@ -33,12 +33,14 @@ import {
   medusaCartCheckout,
   medusaGetPaymentInfo,
   medusaTraCuuDonHang,
+  medusaLuuKhachTiemNang,
 } from "../medusa";
 import { timSanPham, laySkuHopLe, ThamSoTimKiem } from "../search";
 import { lamGiauSanPham, dinhDangChoLLM, traCuuThat } from "../catalog";
 import {
   chuanHoaSoLuong,
   chuanHoaSoDienThoai,
+  chuanHoaSdtKhachTiemNang,
   kiemTraDinhDangSku,
   kiemTraSkuCoThat,
   kiemTraTonKho,
@@ -47,6 +49,7 @@ import {
   TrangThaiDonHang,
 } from "./validate";
 import { khachMuonChotDon } from "../checkoutIntent";
+import { guiThongBaoDonMoi } from "../telegram";
 
 // ---------------------------------------------------------------------------
 // Ngữ cảnh & kiểu trả về
@@ -632,6 +635,82 @@ export async function xuLyEscalateToHuman(nc: NguCanhTool, args: any): Promise<K
 }
 
 // ---------------------------------------------------------------------------
+// 11. save_lead — khách để lại số để nhân viên gọi tư vấn
+// ---------------------------------------------------------------------------
+
+const escHtml = (t: string) => t.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+export async function xuLySaveLead(nc: NguCanhTool, args: any): Promise<KetQuaTool> {
+  const sdt = chuanHoaSdtKhachTiemNang(args?.phone);
+  if (!sdt.hopLe) return loi(sdt.maLoi, sdt.thongDiepChoKhach);
+
+  const cat = (v: unknown, n: number) => (typeof v === "string" && v.trim() ? v.trim().slice(0, n) : null);
+  const ten = cat(args?.name, 100);
+  const nhuCau = cat(args?.need, 500);
+
+  // Mỗi hội thoại một dòng. Chỉ báo nhân viên lần đầu hoặc khi khách đổi số;
+  // khách bổ sung tên/nhu cầu thì cập nhật âm thầm để không spam Telegram.
+  const r = await nc.client.query(
+    `INSERT INTO khach_tiem_nang (tenant_id, conversation_id, ten, so_dien_thoai, nhu_cau)
+     VALUES ($1, $2, $3, $4, $5)
+     ON CONFLICT (conversation_id) DO UPDATE SET
+       ten = COALESCE(EXCLUDED.ten, khach_tiem_nang.ten),
+       nhu_cau = COALESCE(EXCLUDED.nhu_cau, khach_tiem_nang.nhu_cau),
+       da_bao_nhan_vien = khach_tiem_nang.da_bao_nhan_vien AND khach_tiem_nang.so_dien_thoai = EXCLUDED.so_dien_thoai,
+       so_dien_thoai = EXCLUDED.so_dien_thoai,
+       da_dong_bo_backend = false,
+       cap_nhat_luc = now()
+     RETURNING id, ten, nhu_cau, da_bao_nhan_vien`,
+    [nc.tenantId, nc.conversationId, ten, sdt.duLieu, nhuCau]
+  );
+  const dong = r.rows[0];
+
+  // Đẩy sang backend Medusa. Lỗi thì giữ cờ chưa đồng bộ, vòng nền sẽ thử lại.
+  if (nc.medusa) {
+    try {
+      await medusaLuuKhachTiemNang(nc.medusa, {
+        conversation_id: nc.conversationId, phone: sdt.duLieu, name: dong.ten, need: dong.nhu_cau,
+      });
+      await nc.client.query(`UPDATE khach_tiem_nang SET da_dong_bo_backend = true WHERE id = $1`, [dong.id]);
+    } catch (e) {
+      console.error("[Tool save_lead] Chưa đẩy được sang backend, sẽ thử lại:", e);
+    }
+  }
+
+  if (!dong.da_bao_nhan_vien) {
+    try {
+      const soNoi = await guiThongBaoDonMoi(
+        nc.tenantId,
+        `📞 <b>KHÁCH ĐỂ LẠI SỐ — CẦN GỌI TƯ VẤN</b>
+
+` +
+          `👤 ${escHtml(dong.ten ?? "(chưa rõ tên)")}
+` +
+          `📱 <code>${sdt.duLieu}</code>
+` +
+          `📝 ${escHtml(dong.nhu_cau ?? "(chưa ghi nhu cầu)")}
+
+` +
+          `Hội thoại: <code>${nc.conversationId}</code>`
+      );
+      if (soNoi > 0) {
+        await nc.client.query(`UPDATE khach_tiem_nang SET da_bao_nhan_vien = true WHERE id = $1`, [dong.id]);
+      }
+    } catch (e) {
+      // Báo Telegram hỏng không được làm mất lead: dòng đã nằm trong CSDL.
+      console.error("[Tool save_lead] Không báo được nhân viên:", e);
+    }
+  }
+
+  return thanhCong({
+    da_luu: true,
+    huong_dan:
+      "Cảm ơn khách và báo nhân viên sẽ gọi lại số này để tư vấn thêm. KHÔNG hứa giờ gọi cụ thể. " +
+      "Vẫn tiếp tục tư vấn nếu khách còn hỏi. Chỉ đọc số hotline nếu có trong TRI THỨC NỘI BỘ.",
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Bộ điều phối
 // ---------------------------------------------------------------------------
 
@@ -648,6 +727,7 @@ export const BANG_HANDLER: Record<string, HamXuLyTool> = {
   checkout: xuLyCheckout,
   get_order_status: xuLyGetOrderStatus,
   escalate_to_human: xuLyEscalateToHuman,
+  save_lead: xuLySaveLead,
 };
 
 /**

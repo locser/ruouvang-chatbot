@@ -163,6 +163,22 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
       parameters: doiTuong({ reason: { type: "string", description: "Lý do ngắn gọn để nhân viên nắm bối cảnh" } }, ["reason"]),
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "save_lead",
+      description:
+        "Lưu tên và số điện thoại khách TỰ NGUYỆN để lại để nhân viên gọi tư vấn thêm, và báo nhân viên. " +
+        "CHỈ gọi khi khách đã nói rõ số điện thoại của họ VÀ đồng ý để nhân viên gọi. " +
+        "KHÔNG dùng cho khách đang chốt đơn (số điện thoại giao hàng đi qua set_shipping_info). " +
+        "KHÔNG chuyển hội thoại sang nhân viên; bot vẫn tiếp tục tư vấn bình thường.",
+      parameters: doiTuong({
+        name: { type: "string", description: "Tên khách xưng, có thể bỏ trống nếu khách không nói" },
+        phone: { type: "string", description: "Số điện thoại khách đưa" },
+        need: { type: "string", description: "Tóm tắt nhu cầu để nhân viên nắm trước khi gọi (món quan tâm, tầm giá, dịp dùng)" },
+      }, ["phone"]),
+    },
+  },
 ];
 
 /** Tra nhanh schema theo tên. */
