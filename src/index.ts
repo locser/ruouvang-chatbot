@@ -5,6 +5,7 @@ import crypto from "crypto";
 import fs from "fs";
 import { env } from "./config/env";
 import { pool, runInTenantContext, runCentralAdmin } from "./db/client";
+import { chayMigration } from "./db/migrate";
 import { matchHardScript, routeModel, sinhCauTraLoiStream, ChatMessage, MODEL_THUC_TE } from "./services/llm";
 import { botDangQuyDoi } from "./services/priceCheck";
 import { anhVietQR } from "./services/vietqr";
@@ -2312,45 +2313,54 @@ app.get("/readyz", async (_req: Request, res: Response) => {
 // START SERVER + TẮT AN TOÀN
 // -----------------------------------------------------------------------------
 if (require.main === module) {
-  const server = app.listen(env.PORT, () => {
-    console.log(`Express Chatbot Gateway is running on port ${env.PORT} in ${env.NODE_ENV} mode.`);
-  });
+  void (async () => {
+    // Đặt migration trong entrypoint để mọi cách chạy source/container đều áp
+    // schema trước khi nhận traffic, kể cả Docker live không dùng Dockerfile repo.
+    await chayMigration();
 
-  let dangTat = false;
-  async function tatAnToan(tinHieu: string) {
-    if (dangTat) return;
-    dangTat = true;
-    console.log(`[Shutdown] Nhận ${tinHieu} — đang đóng an toàn...`);
-
-    // Cưỡng bức thoát nếu quá 15s để không treo quá trình deploy
-    const hen = setTimeout(() => {
-      console.error("[Shutdown] Quá 15s, buộc thoát.");
-      process.exit(1);
-    }, 15_000);
-    hen.unref();
-
-    server.close(async () => {
-      try {
-        await pool.end();
-        console.log("[Shutdown] Đã đóng connection pool. Kết thúc.");
-      } catch (e) {
-        console.error("[Shutdown] Lỗi khi đóng pool:", e);
-      } finally {
-        process.exit(0);
-      }
+    const server = app.listen(env.PORT, () => {
+      console.log(`Express Chatbot Gateway is running on port ${env.PORT} in ${env.NODE_ENV} mode.`);
     });
-  }
 
-  process.on("SIGTERM", () => void tatAnToan("SIGTERM"));
-  process.on("SIGINT", () => void tatAnToan("SIGINT"));
+    let dangTat = false;
+    async function tatAnToan(tinHieu: string) {
+      if (dangTat) return;
+      dangTat = true;
+      console.log(`[Shutdown] Nhận ${tinHieu} — đang đóng an toàn...`);
 
-  // Không để một promise reject không bắt làm sập tiến trình im lặng
-  process.on("unhandledRejection", (ly_do) => {
-    console.error("[unhandledRejection]", ly_do);
-  });
-  process.on("uncaughtException", (err) => {
-    console.error("[uncaughtException]", err);
-    void tatAnToan("uncaughtException");
+      // Cưỡng bức thoát nếu quá 15s để không treo quá trình deploy
+      const hen = setTimeout(() => {
+        console.error("[Shutdown] Quá 15s, buộc thoát.");
+        process.exit(1);
+      }, 15_000);
+      hen.unref();
+
+      server.close(async () => {
+        try {
+          await pool.end();
+          console.log("[Shutdown] Đã đóng connection pool. Kết thúc.");
+        } catch (e) {
+          console.error("[Shutdown] Lỗi khi đóng pool:", e);
+        } finally {
+          process.exit(0);
+        }
+      });
+    }
+
+    process.on("SIGTERM", () => void tatAnToan("SIGTERM"));
+    process.on("SIGINT", () => void tatAnToan("SIGINT"));
+
+    // Không để một promise reject không bắt làm sập tiến trình im lặng
+    process.on("unhandledRejection", (ly_do) => {
+      console.error("[unhandledRejection]", ly_do);
+    });
+    process.on("uncaughtException", (err) => {
+      console.error("[uncaughtException]", err);
+      void tatAnToan("uncaughtException");
+    });
+  })().catch((e) => {
+    console.error("[Startup] Migration/khởi động thất bại:", e);
+    process.exit(1);
   });
 }
 
