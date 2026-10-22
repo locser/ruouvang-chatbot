@@ -109,6 +109,36 @@ async function goiMeili(body: Record<string, unknown>): Promise<any> {
   );
 }
 
+
+/**
+ * Tên và loại rượu trong catalog viết bằng tiếng Anh ("Red Wine", "Shiraz"…) còn khách hỏi
+ * tiếng Việt ("vang đỏ"). Meilisearch không tự hiểu, nên dịch các cụm hay gặp sang tiếng Anh
+ * và bỏ từ đệm/giá tiền (giá đã có bộ lọc riêng) trước khi tìm.
+ */
+const DAU = String.raw`(?<![\p{L}\p{N}])`;
+const CUOI = String.raw`(?![\p{L}\p{N}])`;
+const cum = (mau: string) => new RegExp(`${DAU}(?:${mau})${CUOI}`, "giu");
+const CUM_VI_SANG_EN: Array<[RegExp, string]> = [
+  [cum(String.raw`(?:rượu\s+)?vang\s+đỏ|vang\s+do`), "red wine"],
+  [cum(String.raw`(?:rượu\s+)?vang\s+trắng|vang\s+trang`), "white wine"],
+  [cum(String.raw`(?:rượu\s+)?vang\s+hồng|vang\s+hong`), "rose"],
+  [cum(String.raw`(?:rượu\s+)?vang\s+sủi|vang\s+sui|sâm\s+panh`), "sparkling"],
+  [cum(String.raw`(?:rượu\s+)?vang\s+ngọt|vang\s+tráng\s+miệng`), "dessert wine"],
+];
+// Từ đệm và số (giá đã có bộ lọc riêng). Chạy SAU bước dịch nên "red wine" không bị đụng tới.
+const TU_DEM_VI = cum(
+  String.raw`khoảng|tầm|giá|dưới|trên|từ|đến|tới|triệu|nghìn|ngàn|k|đ|vnd|cho|mình|em|anh|chị|xin|gợi\s+ý|tư\s+vấn|giúp|loại|chai|một|vài|nào|ngon|rượu|vang|\d+(?:[.,]\d+)?[kđ]?`
+);
+
+export function chuanHoaTuKhoa(q: string): string {
+  const MOC = "\u0001";
+  let r = q ?? "";
+  for (const [re, en] of CUM_VI_SANG_EN) r = r.replace(re, ` ${MOC}${en}${MOC} `);
+  // Chỉ bỏ từ đệm bên ngoài cụm đã dịch.
+  r = r.split(MOC).map((doan, i) => (i % 2 === 1 ? doan : doan.replace(TU_DEM_VI, " "))).join(" ");
+  return r.replace(/\s+/g, " ").trim();
+}
+
 /**
  * Tìm sản phẩm, có cơ chế nới lỏng nhiều bậc.
  *
@@ -125,7 +155,7 @@ export async function timSanPham(tenantId: string, p: ThamSoTimKiem): Promise<Ke
 
   const chay = async (filter: string[]) => {
     const body: Record<string, unknown> = {
-      q: p.query ?? "",
+      q: chuanHoaTuKhoa(p.query ?? ""),
       filter,
       limit: gioiHan,
       attributesToRetrieve: [
