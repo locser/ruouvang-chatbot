@@ -7,6 +7,7 @@ import { env } from "./config/env";
 import { pool, runInTenantContext, runCentralAdmin } from "./db/client";
 import { matchHardScript, routeModel, sinhCauTraLoiStream, ChatMessage, MODEL_THUC_TE } from "./services/llm";
 import { botDangQuyDoi } from "./services/priceCheck";
+import { anhVietQR } from "./services/vietqr";
 import { danhGiaPhamVi } from "./services/scope";
 import { assertSafeTranslation } from "./services/claimGuard";
 import { documentQueue } from "./services/queues";
@@ -711,7 +712,10 @@ app.post("/v1/chat/message", hanMucChatTheoIp, verifySessionToken, async (req: C
               ? `CW${trangThai.orderDisplayId}`
               : `VPH${orderId.replace(/^order_/, "").slice(-8).toUpperCase()}`;
             const description = shortCode;
-            const qrUrl = `https://img.vietqr.io/image/${bankId}-${accountNo}-compact2.png?amount=${amount}&addInfo=${description}&accountName=${accountName}`;
+            // Tự sinh QR để MoMo quét được (img.vietqr.io sinh QR động, MoMo không nhận).
+            // Không nhận ra mã ngân hàng thì quay về dịch vụ ngoài như cũ.
+            const qrUrl = (await anhVietQR({ maNganHang: bankId, soTaiKhoan: accountNo, soTien: amount, noiDung: description }))
+              ?? `https://img.vietqr.io/image/${bankId}-${accountNo}-compact2.png?amount=${amount}&addInfo=${description}&accountName=${accountName}`;
 
             // MỘT MÃ QR, MỘT NGUỒN DUY NHẤT.
             //

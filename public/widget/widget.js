@@ -376,7 +376,7 @@
     if (!unsafe) return "";
     let safe = escapeHtml(unsafe);
     safe = safe.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-    safe = safe.replace(/!\[([^\]]*)\]\((https?:\/\/[^\)]+)\)/g, '<br/><img src="$2" alt="$1" style="max-width:100%; border-radius:8px; margin-top:8px; display:block;"/><br/>');
+    safe = safe.replace(/!\[([^\]]*)\]\((https?:\/\/[^\)]+|data:image\/png;base64,[A-Za-z0-9+\/=]+)\)/g, '<br/><img src="$2" alt="$1" style="max-width:100%; border-radius:8px; margin-top:8px; display:block;"/><br/>');
     safe = safe.replace(/\n/g, '<br/>');
     return safe;
   }
