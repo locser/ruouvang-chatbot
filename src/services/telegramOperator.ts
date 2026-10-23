@@ -8,7 +8,7 @@ import { layCaiDat } from "./caiDat";
 import { fetchCoTimeout, fetchJson, TIMEOUT } from "./http";
 import { env } from "../config/env";
 
-type LoaiLenh = "inventory_adjust" | "create_product" | "inventory_lookup" | "order_list_pending" | "order_complete";
+type LoaiLenh = "inventory_adjust" | "create_product" | "inventory_lookup" | "order_list_pending" | "order_complete" | "order_lookup";
 
 export interface LenhVanHanh {
   type: LoaiLenh;
@@ -22,6 +22,9 @@ export interface LenhVanHanh {
   order_number?: number;
   /** Câu nhắc nhiều số đơn ("duyệt đơn 12, 13"): phải hỏi lại, không đoán. */
   order_numbers?: number[];
+  /** Tra đơn: theo SĐT hoặc theo tên khách (chỉ đọc). */
+  lookup_kind?: "phone" | "name";
+  lookup_text?: string;
 }
 
 interface TelegramMessageLike {
@@ -44,6 +47,7 @@ interface TelegramCallbackLike {
 const UUID_RE = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const CALLBACK_DON_RE = /^ops_ord_(\d{1,9})$/;
 const CALLBACK_LIST = "ops_list";
+const CALLBACK_XEM_RE = /^ops_view_(\d{1,9})$/;
 const CALLBACK_RE = new RegExp(`^ops_(ok|no|pick)_(${UUID_RE})(?:_(\\d+))?$`, "i");
 
 function html(v: unknown): string {
@@ -113,6 +117,70 @@ export function phanTichLenhDonHang(raw: string): LenhVanHanh | null {
   ) {
     return { type: "order_list_pending" };
   }
+  return phanTichTraDon(text, plain, raw);
+}
+
+/** "xem đơn 12", "đơn 12 sao rồi", "tra đơn chị Lan", "đơn của 0912345678": chỉ đọc, không bao giờ ra bản nháp duyệt. */
+function phanTichTraDon(text: string, plain: string, raw: string): LenhVanHanh | null {
+  const dem = "(?:(?:vui long|nho|hay|giup em|giup minh|cho em|cho minh|anh oi|chi oi|em oi|oi)\\s+)*";
+  const xem = "(?:xem|tra cuu|tra|kiem tra|check|tim)";
+  const giup = "(?:\\s+(?:giup|gium|dum)(?:\\s+em|\\s+minh)?)?";
+  const duoi = "(?:\\s+(?:nhe|nha|ne|di|ngay|a|voi|luon|giup|gium|dum|em|minh|anh|chi))*";
+  const don = "don(?:\\s+hang)?";
+
+  const mSo = plain.match(new RegExp(`^${dem}${xem}${giup}\\s+${don}\\s*(?:so\\s*|ma\\s*)?(?:#\\s*|cw\\s*)?(\\d{1,9})${duoi}$`))
+    || plain.match(new RegExp(`^${dem}${don}\\s*(?:so\\s*|ma\\s*)?(?:#\\s*|cw\\s*)?(\\d{1,9})\\s+(?:sao roi|sao the|ra sao|the nao|den dau|xong chua|xong roi chua|da duyet chua|duyet chua|chua)${duoi}$`));
+  if (mSo) {
+    const so = mSo[1];
+    // Dãy số dài là số điện thoại, không phải số đơn.
+    if (so.length < 9 && !so.startsWith("0")) {
+      const n = Number(so);
+      if (Number.isSafeInteger(n) && n > 0) return { type: "order_lookup", order_number: n };
+    }
+  }
+
+  const mSdt = plain.match(new RegExp(`^${dem}(?:${xem}\\s+)?${don}\\s+(?:cua\\s+)?(?:khach\\s+)?(?:sdt\\s*|so dien thoai\\s*|so\\s*)?(\\+?\\d[\\d .]{7,14}\\d)${duoi}$`));
+  if (mSdt) {
+    const digits = mSdt[1].replace(/\D/g, "");
+    if (digits.length >= 9 && digits.length <= 12) return { type: "order_lookup", lookup_kind: "phone", lookup_text: digits };
+  }
+
+  // Nhánh tên dễ bắt nhầm chuyện phiếm, nên chỉ nhận khi có động từ tra/xem/tìm
+  // kèm danh xưng (chị Lan), hoặc khi nhân viên chủ động gọi bot bằng /ops, @bot.
+  const goiRoRang = /^\s*\/ops\b/i.test(raw) || /@\w+/.test(raw);
+  const sach = text.replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter(Boolean);
+  const plainSach = sach.map(boDau).join(" ");
+  const mTen = plainSach.match(new RegExp(`^${dem}(?:(${xem})\\s+${don}\\s+(?:cua\\s+)?|${don}\\s+cua\\s+)(.+)$`));
+  if (mTen) {
+    const coDongTu = Boolean(mTen[1]);
+    let tu = mTen[2].trim().split(/\s+/);
+    const k = tu.length;
+    const goc = sach.slice(sach.length - k);
+    const boDuoi = new Set(["nhe", "nha", "ne", "di", "ngay", "voi", "luon", "giup", "gium", "dum", "em", "minh"]);
+    const cumDuoi = [["giao", "chua"], ["sao", "roi"], ["the", "nao"], ["dau", "roi"], ["chua"], ["dau"]];
+    let doi = true;
+    while (doi && tu.length) {
+      doi = false;
+      if (boDuoi.has(tu[tu.length - 1])) { tu.pop(); doi = true; continue; }
+      for (const c of cumDuoi) {
+        if (tu.length > c.length && c.every((w, n) => tu[tu.length - c.length + n] === w)) { tu = tu.slice(0, tu.length - c.length); doi = true; break; }
+      }
+    }
+    const danhXung = new Set(["chi", "anh", "co", "chu", "khach", "ban"]);
+    const chuc = new Set(["khach", "anh", "chi", "co", "chu", "ong", "ba", "bac", "ban", "em"]);
+    const coDanhXung = tu.length > 0 && danhXung.has(tu[0]);
+    let dau = 0;
+    while (dau < tu.length - 1 && chuc.has(tu[dau])) dau++;
+    const ten = tu.slice(dau);
+    const chuoi = ten.join(" ");
+    const phiem = ten.some((w) => ["bi", "loi", "nhieu", "shop", "minh", "em"].includes(w)) ||
+      /\bhom (?:nay|qua)\b|\bda duyet\b/.test(chuoi);
+    const duDieuKien = goiRoRang || (coDongTu && coDanhXung);
+    if (duDieuKien && !phiem && ten.length && ten.length <= 6 && chuoi.length >= 2 && !/\d/.test(chuoi) &&
+      !/^(?:moi|cho|chua|can|nao|hang|khach)\b/.test(chuoi)) {
+      return { type: "order_lookup", lookup_kind: "name", lookup_text: goc.slice(dau, dau + ten.length).join(" ") };
+    }
+  }
   return null;
 }
 
@@ -127,6 +195,13 @@ export function goiYDonHang(raw: string, laChatRieng: boolean): { text: string; 
   const plain = boDau(text);
   const coDon = /\bdon\b|#|\bcw\s*\d/.test(plain);
   const so = Array.from(new Set((plain.match(/\d{1,9}/g) ?? []).map(Number))).filter((n) => n > 0).slice(0, 5);
+  if (coDon && so.length && !/\b(?:duyet|xac nhan|hoan thanh)\b/.test(plain) &&
+    /\b(?:xem|tra|tra cuu|kiem tra|check)\b/.test(plain) && !/\b(?:khong|dung|chua|huy|roi)\b/.test(plain)) {
+    return {
+      text: so.length === 1 ? `Anh/chị muốn xem đơn #${so[0]} phải không?` : `Anh/chị muốn xem đơn nào: ${so.map((n) => `#${n}`).join(" hay ")}?`,
+      reply_markup: { inline_keyboard: so.map((n) => [{ text: `Xem đơn #${n}`, callback_data: `ops_view_${n}` }]) },
+    };
+  }
   if (coDon && so.length && /\b(?:duyet|xac nhan|hoan thanh)\b/.test(plain) &&
     !/\b(?:khong|dung|chua|huy|roi)\b/.test(plain)) {
     const ds = so.map((n) => `#${n}`).join(" hay ");
@@ -275,6 +350,16 @@ const OPERATOR_TOOLS = [
       }, required: ["order_number"] },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "order_lookup",
+      description: "Tra thông tin một đơn hàng (chỉ đọc) theo số đơn, số điện thoại hoặc tên khách. Dùng cho 'xem đơn 12', 'tra đơn chị Lan'. Không dùng để duyệt.",
+      parameters: { type: "object", additionalProperties: false, properties: {
+        order_number: { type: "integer", minimum: 1 }, query: { type: "string" },
+      } },
+    },
+  },
 ] as const;
 
 async function phanTichBangAi(text: string): Promise<LenhVanHanh | null> {
@@ -282,13 +367,13 @@ async function phanTichBangAi(text: string): Promise<LenhVanHanh | null> {
     { role: "system", content:
       "Bạn là bộ phân tích lệnh vận hành kho. Chỉ gọi đúng một tool khi nhân viên yêu cầu rõ. " +
       "Không đoán SKU, giá, số lượng. 'nhập thêm N' là quantity_change dương; 'xuất/giảm N' là âm. " +
-      "Hỏi đơn mới/đơn chưa duyệt thì gọi order_list_pending; duyệt/xác nhận đơn N thì gọi order_complete với số đơn N. " +
+      "Hỏi đơn mới/đơn chưa duyệt thì gọi order_list_pending; xem/tra đơn thì gọi order_lookup (không duyệt); duyệt/xác nhận đơn N thì gọi order_complete với số đơn N. " +
       "Nếu chưa đủ dữ kiện thì không gọi tool." },
     { role: "user", content: text },
   ];
   const kq = await goiDeepSeekCoTool(messages, OPERATOR_TOOLS as unknown as object[]);
   const call = kq.tool_calls?.[0];
-  if (!call || !["inventory_adjust", "inventory_lookup", "create_product", "order_list_pending", "order_complete"].includes(call.function.name)) return null;
+  if (!call || !["inventory_adjust", "inventory_lookup", "create_product", "order_list_pending", "order_complete", "order_lookup"].includes(call.function.name)) return null;
   try {
     const p = JSON.parse(call.function.arguments || "{}");
     if (call.function.name === "order_complete") {
@@ -297,6 +382,15 @@ async function phanTichBangAi(text: string): Promise<LenhVanHanh | null> {
       return { type: "order_complete", order_number: n };
     }
     if (call.function.name === "order_list_pending") return { type: "order_list_pending" };
+    if (call.function.name === "order_lookup") {
+      const n = Number(p.order_number);
+      if (Number.isSafeInteger(n) && n > 0) return { type: "order_lookup", order_number: n };
+      const q = String(p.query ?? "").trim().slice(0, 60);
+      if (!q) return null;
+      const digits = q.replace(/\D/g, "");
+      return digits.length >= 9 ? { type: "order_lookup", lookup_kind: "phone", lookup_text: digits }
+        : { type: "order_lookup", lookup_kind: "name", lookup_text: q };
+    }
     return { type: call.function.name as LoaiLenh, ...p };
   } catch {
     return null;
@@ -382,7 +476,9 @@ interface DonChoDuyet {
   status?: string;
   display_id: number;
   total_vnd: number;
-  customer?: { name?: string };
+  created_at?: string;
+  tracking_code?: string | null;
+  customer?: { name?: string; phone?: string | null; address?: string | null };
   items?: Array<{ title: string; quantity: number }>;
 }
 
@@ -508,6 +604,82 @@ async function lapBanNhapDonHang(bot: BotShop, tenantId: string, chatId: string,
   if (action.created) await guiBanNhap(bot, chatId, action.id, "order_complete", payload);
 }
 
+const TRANG_THAI_DON: Record<string, string> = { pending: "🕒 Chờ duyệt", completed: "✅ Đã hoàn thành", canceled: "❌ Đã huỷ" };
+
+/** dd/mm hh:mm theo giờ Việt Nam (UTC+7). */
+export function dinhDangNgayVN(iso?: string): string {
+  const t = iso ? new Date(iso).getTime() : NaN;
+  if (!Number.isFinite(t)) return "";
+  const d = new Date(t + 7 * 3600_000);
+  const h = (n: number) => String(n).padStart(2, "0");
+  return `${h(d.getUTCDate())}/${h(d.getUTCMonth() + 1)} ${h(d.getUTCHours())}:${h(d.getUTCMinutes())}`;
+}
+
+export function chiTietDon(o: DonChoDuyet): string {
+  const mon = (o.items ?? []).slice(0, 10).map((it) => `• ${html(it.quantity)} × ${html(it.title)}`).join("\n");
+  const ngay = dinhDangNgayVN(o.created_at);
+  return [
+    `🧾 <b>Đơn #${html(o.display_id)}</b> · ${TRANG_THAI_DON[String(o.status)] ?? html(o.status)}`,
+    ngay ? `📅 ${ngay}` : "",
+    `👤 ${html(o.customer?.name || "Khách lẻ")}${o.customer?.phone ? ` · ${html(o.customer.phone)}` : ""}`,
+    o.customer?.address ? `📍 ${html(o.customer.address)}` : "",
+    mon,
+    `💰 Tổng: <b>${dinhDangTien(o.total_vnd)}</b>`,
+    dongTien(o.payment_status),
+    o.tracking_code ? `🚚 Mã vận đơn: ${html(o.tracking_code)}` : "",
+  ].filter(Boolean).join("\n");
+}
+
+async function guiMotDon(bot: BotShop, chatId: string, o: DonChoDuyet): Promise<void> {
+  await guiTinQuaBot(bot, {
+    chat_id: chatId,
+    parse_mode: "HTML",
+    text: chiTietDon(o),
+    reply_markup: o.status === "pending"
+      ? { inline_keyboard: [[{ text: "✅ Duyệt đơn này", callback_data: `ops_ord_${o.display_id}` }]] }
+      : undefined,
+  });
+}
+
+const CAC_TRANG_THAI = ["pending", "completed", "canceled"] as const;
+
+async function traDonTheoSo(bot: BotShop, tenantId: string, chatId: string, soDon: number): Promise<void> {
+  const cfg = await layMedusa(tenantId);
+  const don = chonDonTheoSo(await layDon(cfg, { display_id: String(soDon) }), soDon);
+  if (!don) throw new LoiThanThien(`Không tìm thấy đơn số ${soDon}. Anh/chị kiểm tra lại số đơn giúp em nhé.`);
+  await guiMotDon(bot, chatId, don);
+}
+
+async function traDonTheoNguoi(bot: BotShop, tenantId: string, chatId: string, kind: "phone" | "name", chuoi: string): Promise<void> {
+  const cfg = await layMedusa(tenantId);
+  // Backend không lọc theo tên, và so SĐT bằng chuỗi thô (bỏ sót "0912 345 678"),
+  // nên lấy các đơn gần đây của từng trạng thái rồi lọc ở đây.
+  const gop = (await Promise.all(CAC_TRANG_THAI.map((st) => layDon(cfg, { status: st, limit: "50" })))).flat();
+  const tuKhoa = boDau(chuoi).replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter(Boolean);
+  const chin = chuoi.replace(/\D/g, "").slice(-9);
+  const khop = gop.filter((o) => {
+    if (kind === "phone") return chin.length >= 9 && String(o.customer?.phone ?? "").replace(/\D/g, "").endsWith(chin);
+    // Khớp nguyên từ hoặc đầu từ ("An" khớp "Anh" nhưng không khớp "Lan").
+    const tuTen = boDau(String(o.customer?.name ?? "")).replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter(Boolean);
+    return tuKhoa.length > 0 && tuKhoa.every((t) => tuTen.some((w) => w === t || w.startsWith(t)));
+  });
+  khop.sort((a, b) => String(b.created_at ?? "").localeCompare(String(a.created_at ?? "")));
+  if (!khop.length) {
+    throw new LoiThanThien(`Em chỉ tìm được trong các đơn gần đây và chưa thấy đơn nào của ${kind === "phone" ? "số điện thoại này" : `“${chuoi}”`}. Anh/chị gõ số đơn (ví dụ: xem đơn 12) để em tìm chính xác nhé.`);
+  }
+  if (khop.length === 1) return guiMotDon(bot, chatId, khop[0]);
+  const hien = khop.slice(0, 5);
+  await guiTinQuaBot(bot, {
+    chat_id: chatId,
+    parse_mode: "HTML",
+    text: `🔎 <b>Có ${khop.length} đơn khớp</b>\n\n` +
+      hien.map((o) => `#${o.display_id} · ${html(o.customer?.name || "Khách lẻ")} · ${dinhDangTien(o.total_vnd)} · ${TRANG_THAI_DON[String(o.status)] ?? ""}`).join("\n") +
+      (khop.length > 5 ? "\n\nCòn thêm đơn khác, anh/chị gõ rõ hơn (số điện thoại hoặc số đơn) để em tìm chính xác." : "") +
+      "\n\nBấm nút để xem chi tiết:",
+    reply_markup: { inline_keyboard: hien.map((o) => [{ text: `Xem đơn #${o.display_id}`, callback_data: `ops_view_${o.display_id}` }]) },
+  });
+}
+
 async function guiDanhSachDonChoDuyet(bot: BotShop, tenantId: string, chatId: string): Promise<void> {
   const cfg = await layMedusa(tenantId);
   const ds = await layDon(cfg, { status: "pending", limit: "11", order: "asc" });
@@ -540,6 +712,7 @@ export async function xuLyYeuCauVanHanh(bot: BotShop, tenantId: string, message:
       "• <code>/ops tạo sản phẩm mới ... giá 1200000</code>\n" +
       "• <code>đơn mới</code> hoặc <code>có đơn nào chưa duyệt</code>: xem đơn chờ duyệt\n" +
       "• <code>duyệt đơn 12</code>: duyệt đơn số 12\n" +
+      "• <code>xem đơn 12</code>, <code>tra đơn chị Lan</code>, <code>đơn của 0912345678</code>: xem thông tin đơn\n" +
       "• Gửi ảnh nhãn chai kèm chú thích <code>/ops mới nhập thêm 30 chai</code>\n\n" +
       "Bot luôn yêu cầu bấm xác nhận trước khi ghi dữ liệu." });
     return;
@@ -559,6 +732,12 @@ export async function xuLyYeuCauVanHanh(bot: BotShop, tenantId: string, message:
     : (phanTichLenhNhanh(text) ?? await phanTichBangAi(text));
   if (!lenh) throw new LoiThanThien("Mình chưa hiểu thao tác. Hãy ghi rõ tên chai và số lượng, ví dụ: /ops Chateau X mới nhập thêm 30 chai. Muốn xem đơn, gõ “đơn mới”.");
 
+  if (lenh.type === "order_lookup") {
+    if (lenh.order_number) await traDonTheoSo(bot, tenantId, chatId, Number(lenh.order_number));
+    else if (lenh.lookup_kind && lenh.lookup_text) await traDonTheoNguoi(bot, tenantId, chatId, lenh.lookup_kind, lenh.lookup_text);
+    else throw new LoiThanThien("Anh/chị cho em xin số đơn, số điện thoại hoặc tên khách nhé, ví dụ: xem đơn 12.");
+    return;
+  }
   if (lenh.type === "order_list_pending") {
     await guiDanhSachDonChoDuyet(bot, tenantId, chatId);
     return;
@@ -665,6 +844,18 @@ export async function xuLyCallbackVanHanh(bot: BotShop, tenantId: string, callba
     } catch (e: any) {
       if (!(e instanceof LoiThanThien)) console.error("[telegram-operator] lấy danh sách đơn lỗi:", e);
       await guiTinQuaBot(bot, { chat_id: chat, text: `⚠️ ${html(e instanceof LoiThanThien ? e.message : "Em chưa lấy được danh sách đơn. Anh/chị thử lại sau ít phút giúp em nhé.")}`, parse_mode: "HTML" });
+    }
+    return true;
+  }
+  const khopXem = String(callback.data || "").match(CALLBACK_XEM_RE);
+  if (khopXem) {
+    const chat = String(callback.message?.chat?.id || "");
+    await answerCallbackQuery(bot, callback.id, "Đang mở đơn…");
+    try {
+      await traDonTheoSo(bot, tenantId, chat, Number(khopXem[1]));
+    } catch (e: any) {
+      if (!(e instanceof LoiThanThien)) console.error("[telegram-operator] xem đơn lỗi:", e);
+      await guiTinQuaBot(bot, { chat_id: chat, text: `⚠️ ${html(e instanceof LoiThanThien ? e.message : "Em chưa mở được đơn này. Anh/chị thử lại sau ít phút giúp em nhé.")}`, parse_mode: "HTML" });
     }
     return true;
   }

@@ -340,4 +340,152 @@ describe("Telegram operator: đơn hàng", () => {
     expect(t).not.toMatch(/pay_01|boom|từ trước/);
     expect(canhBaoDeHieu(["Đơn đã ở trạng thái completed từ trước."])).toEqual([]);
   });
+
+  describe("tra thông tin đơn (chỉ đọc)", () => {
+    test.each([
+      ["xem đơn 12", { order_number: 12 }], ["xem don 12", { order_number: 12 }], ["kiểm tra đơn CW12", { order_number: 12 }],
+      ["kiem tra don cw12", { order_number: 12 }], ["tra đơn #12", { order_number: 12 }], ["đơn 12 sao rồi", { order_number: 12 }],
+      ["don 12 sao roi", { order_number: 12 }], ["xem đơn 12 giúp em", { order_number: 12 }], ["đơn 12 xong chưa", { order_number: 12 }],
+      ["đơn của 0912345678", { lookup_kind: "phone", lookup_text: "0912345678" }],
+      ["tra đơn 0912 345 678", { lookup_kind: "phone", lookup_text: "0912345678" }],
+      ["xem đơn của khách 0912345678", { lookup_kind: "phone", lookup_text: "0912345678" }],
+      ["tra đơn chị Lan", { lookup_kind: "name", lookup_text: "Lan" }],
+      ["/ops tìm đơn Nguyễn Văn A", { lookup_kind: "name", lookup_text: "Nguyễn Văn A" }],
+      ["/ops tim don nguyen van a", { lookup_kind: "name", lookup_text: "nguyen van a" }],
+      ["/ops đơn của anh Hùng", { lookup_kind: "name", lookup_text: "Hùng" }],
+    ])("hiểu câu tra đơn: %s", (cau, mong) => {
+      expect(phanTichLenhDonHang(cau)).toEqual({ type: "order_lookup", ...mong });
+      expect(laYeuCauVanHanh({ chat: { id: 1 }, text: cau }, bot)).toBe(true);
+    });
+
+    test.each([
+      ["tra đơn chị Lan?", "Lan"], ["tra đơn chị Lan ?", "Lan"], ["/ops xem đơn của Nguyễn Văn A.", "Nguyễn Văn A"],
+      ["tra đơn anh Hùng giao chưa", "Hùng"], ["tìm đơn khách Lan sao rồi", "Lan"], ["kiểm tra đơn chị Lan nhé", "Lan"],
+    ])("tách tên sạch: %s", (cau, ten) => {
+      expect(phanTichLenhDonHang(cau)).toEqual({ type: "order_lookup", lookup_kind: "name", lookup_text: ten });
+    });
+
+    test.each([
+      "đơn của em bị lỗi", "đơn của shop mình hôm nay nhiều quá", "xem đơn đã duyệt", "kiểm tra đơn hàng hôm nay",
+      "tìm đơn Nguyễn Văn A", "đơn của anh Hùng", "/ops xem đơn đã duyệt", "/ops đơn của shop mình",
+    ])("không bắt nhầm chuyện phiếm thành tra tên: %s", (cau) => {
+      expect(phanTichLenhDonHang(cau)?.type ?? "").not.toBe("order_lookup");
+    });
+
+    test("xem đơn không bao giờ thành lệnh duyệt; xem đơn mới vẫn là danh sách", () => {
+      for (const c of ["xem đơn 12", "đơn 12 sao rồi", "kiểm tra đơn CW12", "tra đơn chị Lan"]) {
+        expect(phanTichLenhNhanh(c)?.type).toBe("order_lookup");
+      }
+      expect(phanTichLenhNhanh("xem đơn mới")).toEqual({ type: "order_list_pending" });
+      expect(phanTichLenhNhanh("xem đơn")).toEqual({ type: "order_list_pending" });
+      expect(phanTichLenhNhanh("duyệt đơn 12")?.type).toBe("order_complete");
+    });
+
+    test("lưới gợi ý: xem/tra đơn + số ra nút chỉ đọc", () => {
+      const g: any = goiYDonHang("anh xem hộ em đơn 12 cái", false);
+      expect(g.reply_markup.inline_keyboard[0][0].callback_data).toBe("ops_view_12");
+    });
+
+    test("tra theo số: hiện đủ thông tin, có nút duyệt khi đang chờ", async () => {
+      const o = { ...don(12, ORDER_ID), created_at: "2026-10-22T07:05:00Z", payment_status: "cho_chuyen_khoan", tracking_code: "VD123",
+        customer: { name: "Nguyễn Văn A", phone: "0912345678", address: "1 Lê Lợi, HCM" } };
+      (fetchJson as jest.Mock).mockResolvedValue({ orders: [don(112), o] });
+      await xuLyYeuCauVanHanh(bot, "tenant-1", tin("xem đơn 12"));
+      expect(String((fetchJson as jest.Mock).mock.calls[0][0])).toContain("display_id=12");
+      const m = gui.mock.calls[0][1];
+      expect(m.text).toContain("Đơn #12");
+      expect(m.text).toContain("Chờ duyệt");
+      expect(m.text).toContain("22/10 14:05");
+      expect(m.text).toContain("0912345678");
+      expect(m.text).toContain("1 Lê Lợi, HCM");
+      expect(m.text).toContain("1.250.000đ");
+      expect(m.text).toContain("Chờ chuyển khoản");
+      expect(m.text).toContain("VD123");
+      expect(m.text).not.toContain(ORDER_ID);
+      expect(m.reply_markup.inline_keyboard[0][0].callback_data).toBe("ops_ord_12");
+      expect(sqlCalls.some((c) => /INSERT/.test(c.sql))).toBe(false);
+    });
+
+    test("đơn đã hoàn thành/huỷ: có trạng thái chữ, không có nút duyệt", async () => {
+      (fetchJson as jest.Mock).mockResolvedValue({ orders: [don(12, "o", "completed")] });
+      await xuLyYeuCauVanHanh(bot, "tenant-1", tin("xem đơn 12"));
+      expect(gui.mock.calls[0][1].text).toContain("Đã hoàn thành");
+      expect(gui.mock.calls[0][1].reply_markup).toBeUndefined();
+      gui.mockClear();
+      (fetchJson as jest.Mock).mockResolvedValue({ orders: [don(12, "o", "canceled")] });
+      await xuLyYeuCauVanHanh(bot, "tenant-1", { ...tin("xem đơn 12"), message_id: 8 });
+      expect(gui.mock.calls[0][1].text).toContain("Đã huỷ");
+    });
+
+    test("không thấy đơn theo số", async () => {
+      (fetchJson as jest.Mock).mockResolvedValue({ orders: [] });
+      await expect(xuLyYeuCauVanHanh(bot, "tenant-1", tin("xem đơn 99"))).rejects.toThrow("Không tìm thấy đơn số 99.");
+    });
+
+    test("tra theo SĐT: gọi q= cho từng trạng thái, lọc đúng số", async () => {
+      (fetchJson as jest.Mock).mockImplementation(async (u: string) => ({
+        orders: u.includes("status=pending")
+          ? [{ ...don(5), customer: { name: "A", phone: "+84912345678" } }, { ...don(6), customer: { name: "B", phone: "0999999999" } }]
+          : [],
+      }));
+      await xuLyYeuCauVanHanh(bot, "tenant-1", tin("đơn của 0912345678"));
+      const urls = (fetchJson as jest.Mock).mock.calls.map((c) => String(c[0]));
+      expect(urls).toHaveLength(3);
+      expect(urls.some((u) => u.includes("q="))).toBe(false);
+      expect(gui.mock.calls[0][1].text).toContain("Đơn #5");
+    });
+
+    test("tra theo tên: lọc phía bot (không dấu), nhiều kết quả có nút Xem đơn", async () => {
+      const tenLan = (id: number, st: string) => ({ ...don(id, `o${id}`, st), customer: { name: "Trần Thị Lan", phone: "0900" } });
+      (fetchJson as jest.Mock).mockImplementation(async (u: string) => ({
+        orders: u.includes("status=pending") ? [tenLan(1, "pending"), don(2)] : u.includes("status=completed") ? [tenLan(3, "completed")] : [],
+      }));
+      await xuLyYeuCauVanHanh(bot, "tenant-1", tin("tra đơn chị lan"));
+      const m = gui.mock.calls[0][1];
+      expect(m.text).toContain("Có 2 đơn khớp");
+      expect(m.text).not.toContain("#2 ");
+      expect(m.reply_markup.inline_keyboard.map((h: any) => h[0].callback_data).sort()).toEqual(["ops_view_1", "ops_view_3"]);
+    });
+
+    test("tra theo tên: chỉ hiện 5 đơn và không thấy thì gợi ý", async () => {
+      (fetchJson as jest.Mock).mockImplementation(async (u: string) => ({
+        orders: u.includes("status=pending") ? Array.from({ length: 7 }, (_, i) => ({ ...don(i + 1), customer: { name: "Lan" } })) : [],
+      }));
+      await xuLyYeuCauVanHanh(bot, "tenant-1", tin("tra đơn chị Lan"));
+      expect(gui.mock.calls[0][1].reply_markup.inline_keyboard).toHaveLength(5);
+      (fetchJson as jest.Mock).mockResolvedValue({ orders: [] });
+      await expect(xuLyYeuCauVanHanh(bot, "tenant-1", { ...tin("tra đơn chị Xyz"), message_id: 9 })).rejects.toThrow(/Em chỉ tìm được trong các đơn gần đây và chưa thấy đơn nào của “Xyz”.*xem đơn 12/);
+    });
+
+    test("tra SĐT có dấu cách trong dữ liệu vẫn khớp", async () => {
+      (fetchJson as jest.Mock).mockImplementation(async (u: string) => ({
+        orders: u.includes("status=completed") ? [{ ...don(8, "o8", "completed"), customer: { name: "B", phone: "0912 345 678" } }] : [],
+      }));
+      await xuLyYeuCauVanHanh(bot, "tenant-1", tin("đơn của 0912345678"));
+      expect(gui.mock.calls[0][1].text).toContain("Đơn #8");
+    });
+
+    test("khớp tên theo từ: An không khớp Lan", async () => {
+      (fetchJson as jest.Mock).mockImplementation(async (u: string) => ({
+        orders: u.includes("status=pending") ? [{ ...don(1), customer: { name: "Trần Thị Lan" } }, { ...don(2), customer: { name: "Lê Anh" } }] : [],
+      }));
+      await xuLyYeuCauVanHanh(bot, "tenant-1", tin("tra đơn chị An"));
+      expect(gui.mock.calls[0][1].text).toContain("Đơn #2");
+      expect(gui.mock.calls[0][1].text).not.toContain("#1 ");
+    });
+
+    test("nút Xem đơn #N chỉ đọc, không tạo action", async () => {
+      (fetchJson as jest.Mock).mockResolvedValue({ orders: [don(12, ORDER_ID)] });
+      await xuLyCallbackVanHanh(bot, "tenant-1", { id: "cv", data: "ops_view_12", from: { id: 9 }, message: { chat: { id: 7 } } });
+      expect(gui.mock.calls[0][1].text).toContain("Đơn #12");
+      expect(sqlCalls.some((c) => /INSERT/.test(c.sql))).toBe(false);
+    });
+
+    test("cổng nhân viên: webhook chỉ cho ops_* sau khi kiểm tra whitelist (callback ops_view_ cùng tiền tố)", () => {
+      // Phân quyền nằm ở src/index.ts (dataStr.startsWith("ops_") -> laNhanVienCuaShop), dùng chung cho ops_view_.
+      const fs = require("fs");
+      const src: string = fs.readFileSync(require("path").join(__dirname, "index.ts"), "utf8");
+      expect(src).toMatch(/startsWith\("ops_"\)\) \{\s*if \(!\(await laNhanVienCuaShop/);
+    });
+  });
 });
