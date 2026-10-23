@@ -27,7 +27,7 @@ import { khachMuonChotDon, botHuaGuiQr } from "./services/checkoutIntent";
 import { chayOrchestrator, trangThaiMoi } from "./services/orchestrator";
 import { fetchJson } from "./services/http";
 import { routerCaiDat, routerCongKhai } from "./routes/caiDat";
-import { laYeuCauVanHanh, xuLyCallbackVanHanh, xuLyYeuCauVanHanh } from "./services/telegramOperator";
+import { LoiThanThien, goiYDonHang, trongGiongLenh, laYeuCauVanHanh, laYeuCauVanHanhRoRang, xuLyCallbackVanHanh, xuLyYeuCauVanHanh } from "./services/telegramOperator";
 import { layCaiDat } from "./services/caiDat";
 
 import { quetTiemLenh } from "./worker";
@@ -1060,7 +1060,12 @@ app.post("/v1/internal/order-notify", async (req: Request, res: Response) => {
   }
   const nutHopLe = nut && typeof nut.text === "string" && typeof nut.url === "string" ? { text: nut.text, url: nut.url } : undefined;
   try {
-    const soNoiGui = await guiThongBaoDonMoi(tenantId, text.slice(0, 3500), nutHopLe);
+    // Tin "ĐƠN MỚI CW12 ..." kèm nút bấm thẳng ra bản nháp duyệt đơn #12.
+    const soDon = Number(String(text).match(/ĐƠN MỚI\s+CW(\d{1,9})/i)?.[1] ?? req.body?.displayId);
+    const nutDuyet = Number.isSafeInteger(soDon) && soDon > 0
+      ? { text: "✅ Duyệt đơn này", callback_data: `ops_ord_${soDon}` }
+      : undefined;
+    const soNoiGui = await guiThongBaoDonMoi(tenantId, text.slice(0, 3500), nutHopLe, nutDuyet);
     return res.json({ ok: true, da_gui: soNoiGui });
   } catch (error: any) {
     console.error("[order-notify]", error);
@@ -1330,18 +1335,38 @@ app.post("/v1/tg/webhook/:tenant_id", async (req: Request, res: Response) => {
       // Chế độ vận hành kho trong group/private chat. Tin nhắn chữ chỉ vào
       // nhánh này khi có /ops, @mention hoặc reply bot; ảnh luôn lập bản nháp.
       // Nhờ vậy không thể vô tình gửi một lệnh kho thành câu trả lời cho khách.
-      if (laYeuCauVanHanh(message, bot)) {
-        if (!operatorId || !(await laNhanVienCuaShop(tenantId, operatorId))) {
+      // Câu thường như "đơn mới", "duyệt đơn 12" cũng vào đây, nhưng nếu người
+      // gõ không phải nhân viên thì bỏ qua êm (không báo "chưa được cấp quyền").
+      const roRang = laYeuCauVanHanhRoRang(message, bot);
+      const chuyenVanHanh = laYeuCauVanHanh(message, bot);
+      const laNhanVien = chuyenVanHanh && operatorId ? await laNhanVienCuaShop(tenantId, operatorId) : false;
+      let vaoVanHanh = chuyenVanHanh && (laNhanVien || roRang);
+      if (vaoVanHanh && laNhanVien && !roRang) {
+        // Nhân viên đang tiếp quản một khách thì câu thường là lời nói với khách,
+        // không phải lệnh. Chỉ /ops, @bot, reply bot hoặc nút bấm mới là lệnh.
+        const dangTiepQuan = await runInTenantContext(tenantId, async (client) => {
+          const r = await client.query(
+            `SELECT 1 FROM conversation
+              WHERE tenant_id = $2 AND assigned_to = $1
+                AND mode IN ('NGUOI', 'CHO_NGUOI') AND dong_luc IS NULL LIMIT 1`,
+            [operatorId, tenantId]
+          );
+          return r.rows.length > 0;
+        });
+        if (dangTiepQuan) vaoVanHanh = false;
+      }
+      if (vaoVanHanh) {
+        if (!operatorId || !laNhanVien) {
           await guiTinQuaBot(bot, { chat_id: chatId, text: "⛔ Tài khoản Telegram này chưa được cấp quyền nhân viên của shop." });
           return res.json({ ok: true });
         }
         try {
           await xuLyYeuCauVanHanh(bot, tenantId, message);
         } catch (e: any) {
-          await guiTinQuaBot(bot, {
-            chat_id: chatId,
-            text: `⚠️ ${String(e?.message || e).slice(0, 800)}`,
-          });
+          let noiDung = "Em chưa làm được việc này. Anh/chị thử lại sau ít phút giúp em nhé.";
+          if (e instanceof LoiThanThien) noiDung = e.message;
+          else console.error("[telegram-operator] lỗi xử lý lệnh vận hành:", e);
+          await guiTinQuaBot(bot, { chat_id: chatId, text: `⚠️ ${noiDung.slice(0, 800)}` });
         }
         return res.json({ ok: true });
       }
@@ -1395,10 +1420,15 @@ app.post("/v1/tg/webhook/:tenant_id", async (req: Request, res: Response) => {
             });
             await guiTinQuaBot(bot, {
               chat_id: chatId,
-              text: `✅ Đã gửi phản hồi tới khách hàng (\`${conv.slice(0, 8)}\`): "${text}"`,
+              text: `✅ Đã gửi phản hồi tới khách hàng (\`${conv.slice(0, 8)}\`): "${text}"` +
+                (trongGiongLenh(text) ? "\n(Muốn ra lệnh cho bot thì gõ /ops trước câu lệnh.)" : ""),
               parse_mode: "Markdown",
             });
           }
+        } else if (!message.photo?.length) {
+          // Không tiếp quản khách nào mà gõ câu về đơn bot chưa hiểu: gợi ý nút, đừng im lặng.
+          const goiY = goiYDonHang(text, message.chat?.type === "private");
+          if (goiY) await guiTinQuaBot(bot, { chat_id: chatId, text: goiY.text, reply_markup: goiY.reply_markup as any });
         }
       }
     }

@@ -212,7 +212,8 @@ export async function sendTakeoverAlert(
 export async function guiThongBaoDonMoi(
   tenantId: string,
   text: string,
-  nut?: { text: string; url: string }
+  nut?: { text: string; url: string },
+  nutDuyet?: { text: string; callback_data: string }
 ): Promise<number> {
   const bot = await layBotCuaShop(tenantId);
   if (!bot) {
@@ -240,6 +241,12 @@ export async function guiThongBaoDonMoi(
     } else {
       reply_markup = { inline_keyboard: [[{ text: nut.text, url: nut.url }]] };
     }
+  }
+
+  if (nutDuyet) {
+    // Nút duyệt đơn là một hàng riêng, đứng trên nút mở admin (nếu có).
+    const hang = [{ text: nutDuyet.text, callback_data: nutDuyet.callback_data }];
+    reply_markup = { inline_keyboard: [hang, ...(reply_markup?.inline_keyboard ?? [])] };
   }
 
   let soOk = 0;
