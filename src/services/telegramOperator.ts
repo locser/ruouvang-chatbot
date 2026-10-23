@@ -66,7 +66,7 @@ interface TelegramCallbackLike {
   message?: { chat?: { id?: string | number } };
 }
 
-const UUID_RE = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
+export const UUID_RE = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const CALLBACK_DON_RE = /^ops_ord_(\d{1,9})$/;
 const CALLBACK_LIST = "ops_list";
 const CALLBACK_PAY_RE = /^ops_pay_(\d{1,9})$/;
@@ -545,7 +545,28 @@ export function goiYDonHang(raw: string, laChatRieng: boolean): { text: string; 
 /** Câu trông giống một lệnh (đơn hoặc kho) — dùng để nhắc nhân viên đang tiếp quản gõ /ops. */
 export function trongGiongLenh(raw: string): boolean {
   const l = phanTichLenhNhanh(raw);
-  return (l !== null && !l.loi_hieu) || goiYDonHang(raw, false) !== null;
+  return (l !== null && !l.loi_hieu) || goiYDonHang(raw, false) !== null || trongGiongLenhLong(raw);
+}
+
+/** Câu báo kết quả / nói thẳng với khách: có "rồi", "xong" hoặc "cho anh/chị" → không phải lệnh. */
+function laLoiNoiVoiKhach(plain: string): boolean {
+  return /\b(?:roi|xong)\b/.test(plain) || /\bcho\s+(?:anh|chi)\b/.test(plain);
+}
+
+/**
+ * Lệnh viết lệch mẫu ("huỷ giúp đơn 12", "đơn 12 huỷ", "bot huỷ đơn 12", "em huỷ đơn 12", "giảm giá X còn 1200000", "ẩn sản phẩm X").
+ * Câu có "rồi/xong" hoặc "cho anh/chị" là lời nói với khách nên KHÔNG tính.
+ */
+function trongGiongLenhLong(raw: string): boolean {
+  const goc = boTienTo(raw).toLowerCase().trim().replace(/[?!.,;:\s]+$/g, "");
+  const plain = boDau(goc);
+  if (laLoiNoiVoiKhach(plain)) return false;
+  // Ẩn/giấu so trên chuỗi GỐC có dấu (bỏ dấu thì "ăn/an/ấn" lẫn thành một): "Ăn với bò bít tết", "An tâm anh nhé" không dính.
+  const an = /^(?:bot\s+)?(?:ẩn|giấu)\s+(?!giá|danh|thông tin|tên|quà|hoá đơn|hóa đơn)(.+)$/.exec(goc);
+  if (an && (/\d/.test(an[1]) || /(?:^|\s)(?:sản phẩm|sp)(?:\s|$)/.test(an[1]))) return true;
+  return /\b(?:huy|duyet|hoan thanh|xac nhan)\s+(?:giup\s+)?don\s*#?\d+/.test(plain)
+    || /\bdon\s*#?\d+\s+(?:huy|duyet|hoan thanh)$/.test(plain)
+    || /^(?:bot\s+)?giam gia\s+(?!cho\s).+\scon\s+\d/.test(plain);
 }
 
 /** Parser chắc chắn cho các câu kho phổ biến; câu tự do hơn sẽ đi qua LLM. */
@@ -610,6 +631,38 @@ const DEM_LENH = "(?:(?:vui long|nho|hay|giup em|giup minh|cho em|cho minh|anh o
 const MO_DAU_LENH_DON = new RegExp(`^${DEM_LENH}(?:duyet don|xac nhan don|hoan thanh don|huy don|xac nhan da nhan tien|(?:da\\s+)?(?:nhan|thu)(?:\\s+duoc)?\\s+tien|ghi nhan tien)\\b`);
 const MO_DAU_LENH_SHOP = new RegExp(`^${DEM_LENH}(?:(?:tao|them)\\s+(?:ma|voucher|coupon)|(?:an|giau|tat ban)\\s+(?:san pham|sp)|(?:tam\\s+)?ngung ban\\s+(?:san pham|sp)|mo ban lai\\s+(?:san pham|sp)|hien lai san pham|hien san pham|bat lai san pham|ngung kinh doanh\\s+(?:san pham|sp)|(?:doi|sua|cap nhat)\\s+gia)\\b`);
 
+const DUOI_NOI_VOI_KHACH = /(?:^|\s)(?:cho\s+)?(?:anh|chi)\s+(?:nha|nhe|a)$|\s(?:nha|nhe)\s+(?:anh|chi)$|\s(?:anh|chi)$/;
+function coDuoiNoiVoiKhach(plain: string): boolean {
+  return DUOI_NOI_VOI_KHACH.test(plain.replace(/[?!.,;:\s]+$/g, ""));
+}
+
+/**
+ * Khi nhân viên đang tiếp quản: câu cần GIỮ lại (kèm nút "Vẫn gửi") thay vì gửi thẳng cho khách.
+ * Chỉ giữ LỆNH GHI: bị chặn (laLenhGhiDonHang), lệnh viết lệch mẫu, lệnh shop mở đầu rõ mà bot không hiểu,
+ * và lệnh ghi do phanTichLenhNhanh hiểu (mã giảm, đổi giá, ẩn/hiện, tạo sản phẩm, nhập/xuất kho).
+ * Lệnh chỉ đọc (xem đơn, danh sách, doanh thu, tồn kho) không cần giữ. Câu có "rồi/xong"/"cho anh/chị" gửi thẳng.
+ */
+export function canGiuCauChoGui(raw: string): boolean {
+  const plain = boDau(boTienTo(raw)).replace(/[?!.,;:\s]+$/g, "");
+  if (laLoiNoiVoiKhach(plain)) return false;
+  if (laLenhGhiDonHang(raw) || trongGiongLenhLong(raw)) return true;
+  if (MO_DAU_LENH_SHOP.test(plain)) {
+    // "tạo mã giảm 10% nha anh" vẫn giữ; câu bot không hiểu thì giữ trừ khi đuôi rõ ràng nói với khách.
+    const l = phanTichLenhShop(raw);
+    return Boolean(l && !l.loi_hieu) || !coDuoiNoiVoiKhach(plain);
+  }
+  const l = phanTichLenhNhanh(raw);
+  if (!l || l.loi_hieu) return false;
+  if (l.type === "discount_create" || l.type === "price_update" || l.type === "product_hide" || l.type === "product_show" || l.type === "create_product") return true;
+  if (l.type === "inventory_adjust") {
+    // Chỉ khi câu MỞ ĐẦU bằng động từ kho, không có tiền / "là" / "tặng" / "tổng" / "được không" / dấu hỏi.
+    if (!/^(?:bot\s+)?(?:moi\s+nhap|nhap|xuat|tang|giam|bot|tru|cong)\b/.test(plain)) return false;
+    if (/[?]/.test(raw) || /\b(?:la|tang|tong|duoc khong|tr|trieu|k|nghin|ngan|dong|vnd|d)\b|\d\s*(?:tr|k)\b/.test(plain)) return false;
+    return true;
+  }
+  return false;
+}
+
 /**
  * Cổng tiếp quản khách: chỉ chặn câu MỞ ĐẦU bằng động từ mệnh lệnh rõ (duyệt/huỷ đơn, đã nhận tiền đơn,
  * tạo mã, ẩn / ngừng bán / mở bán lại sản phẩm, đổi/sửa giá). Câu nói với khách ("giá bên em 1tr5 ạ",
@@ -617,11 +670,10 @@ const MO_DAU_LENH_SHOP = new RegExp(`^${DEM_LENH}(?:(?:tao|them)\\s+(?:ma|vouche
  */
 export function laLenhGhiDonHang(raw: string): boolean {
   const plain = boDau(boTienTo(raw));
+  // Đuôi "cho anh nhé", "nha chị", "anh ạ", "... anh": lời nói với khách, không chặn (nhánh nào cũng áp).
+  if (coDuoiNoiVoiKhach(plain)) return false;
   const mShop = plain.match(MO_DAU_LENH_SHOP);
   if (mShop) {
-    // Câu kết bằng "nha/nhé anh/chị", "anh/chị ạ" hay có "rồi" ngay sau động từ là lời nói với khách.
-    const gon = plain.replace(/[?!.,;:\s]+$/g, "");
-    if (/\s(?:nha|nhe)\s+(?:anh|chi)$/.test(gon) || /\s(?:anh|chi)\s+a$/.test(gon)) return false;
     if (/^\s*(?:nay\s+)?roi\b/.test(plain.slice(mShop[0].length))) return false;
     // Chỉ chặn khi bot thật sự hiểu đây là lệnh hợp lệ; câu bot không hiểu thì để đi tiếp như lời nói với khách.
     const l = phanTichLenhShop(raw);
@@ -1107,6 +1159,30 @@ function khopDayDu(query: string, title: string): boolean {
   return tu.length > 0 && tu.every((w) => t.includes(w));
 }
 
+/** Ghép tên sản phẩm + tên biến thể: bỏ "Default Title" và phần lặp lại tên sản phẩm. */
+export function ghepTenBienThe(title: string, variantTitle?: string | null): string {
+  const t = String(title || "").trim();
+  const chuan = (x: string) => boDau(x).replace(/\s+/g, " ").trim();
+  const tc = chuan(t);
+  const phan = String(variantTitle || "").split(/\s+[—–-]\s+/).map((x) => x.trim()).filter(Boolean)
+    .filter((x) => !/^default(?:\s+(?:title|variant))?$/i.test(x) && !new RegExp(`(^|\\s)${chuan(x).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(\\s|$)`).test(tc) && chuan(x) !== tc);
+  return [t, ...phan].join(" — ");
+}
+
+/** Nhãn nút Telegram (tối đa 60 ký tự): luôn giữ SKU, giá và phần tên biến thể; cắt phần đầu tên sản phẩm trước. */
+export function nhanNutChon(ten: string, sku?: string, gia = "", toiDa = 60): string {
+  const duoi = `${sku ? ` (${sku})` : ""}${gia ? ` · ${gia}` : ""}`;
+  const du = toiDa - duoi.length;
+  if (ten.length <= du) return `${ten}${duoi}`.slice(0, toiDa);
+  const i = ten.indexOf(" — ");
+  const bien = i >= 0 ? ten.slice(i) : "";
+  const goc = i >= 0 ? ten.slice(0, i) : ten;
+  const conLai = du - bien.length;
+  if (conLai >= 6) return `${goc.slice(0, conLai - 1).trimEnd()}…${bien}${duoi}`;
+  // Phần biến thể quá dài: cắt cả hai nhưng vẫn giữ SKU/giá.
+  return `${ten.slice(0, Math.max(du - 1, 1)).trimEnd()}…${duoi}`.slice(0, toiDa);
+}
+
 interface UngVien { id: string; sku?: string; title: string; variant_id?: string; price_vnd?: number }
 
 /** Gửi danh sách chọn (ops_pick) khi không chắc đúng sản phẩm. */
@@ -1118,7 +1194,7 @@ async function guiDanhSachChon(bot: BotShop, tenantId: string, chatId: string, o
     chat_id: chatId,
     text: `${tieuDe ?? `🔎 Tìm thấy ${ungVien.length} sản phẩm gần giống “${html(query)}”. Chọn đúng sản phẩm:`}\nKhông thấy đúng? Anh/chị gõ rõ tên hơn nhé.`,
     parse_mode: "HTML",
-    reply_markup: { inline_keyboard: ungVien.map((c, i) => [{ text: `${c.title}${c.sku ? ` (${c.sku})` : ""}${c.price_vnd ? ` · ${dinhDangTien(c.price_vnd)}` : ""}`.slice(0, 60), callback_data: `ops_pick_${action.id}_${i}` }]) },
+    reply_markup: { inline_keyboard: ungVien.map((c, i) => [{ text: nhanNutChon(c.title, c.sku, c.price_vnd ? dinhDangTien(c.price_vnd) : ""), callback_data: `ops_pick_${action.id}_${i}` }]) },
   });
 }
 
@@ -1211,7 +1287,7 @@ async function lapActionDoiGia(bot: BotShop, tenantId: string, chatId: string, o
     return true;
   });
   if (!dong.length) throw new LoiThanThien("Em chưa lấy được giá hiện tại của sản phẩm này (có thể sản phẩm đang ẩn). Anh/chị kiểm tra trong trang quản trị giúp em nhé.");
-  const nhan = (d: DongLookup) => `${d.title}${d.variant_title && d.variant_title !== d.title && !/^default/i.test(d.variant_title) ? ` — ${d.variant_title}` : ""}`;
+  const nhan = (d: DongLookup) => ghepTenBienThe(d.title, d.variant_title);
   const ungVien: UngVien[] = dong.slice(0, 8).map((d) => ({ id: d.product_id, variant_id: d.variant_id, sku: d.sku, title: nhan(d), price_vnd: Number(d.price_vnd) || 0 }));
   const payload = { product_query: query, new_price_vnd: gia };
   if (sp.length === 1 && khopUngVien(query, sp[0].title, sp[0].sku) && dong.length === 1) {
@@ -1858,19 +1934,32 @@ export async function luuCauChoGui(tenantId: string, chatId: string, operatorId:
   return a.id;
 }
 
-/** Lấy (và đánh dấu đã dùng) câu đã lưu: chỉ đúng người gõ, đúng chat, còn hạn, dùng một lần. Trả cả hội thoại đã lưu. */
+/** Đọc câu đã lưu (CHƯA đánh dấu đã dùng): chỉ đúng người gõ, đúng chat, còn hạn. Trả cả hội thoại đã lưu. */
 export async function layCauChoGui(tenantId: string, id: string, chatId: string, operatorId: string): Promise<{ text: string; conversationId: string } | null> {
   return runInTenantContext(tenantId, async (client) => {
     const r = await client.query(
-      `UPDATE telegram_operator_action SET status='completed', confirmed_by=$1
+      `SELECT payload->>'text' AS text, payload->>'conversation_id' AS conversation_id
+         FROM telegram_operator_action
         WHERE id=$2 AND tenant_id=$3 AND telegram_chat_id=$4 AND action_type='forward_to_customer'
-          AND status='awaiting_confirmation' AND expires_at > now() AND requested_by=$1
-        RETURNING payload->>'text' AS text, payload->>'conversation_id' AS conversation_id`,
+          AND status='awaiting_confirmation' AND expires_at > now() AND requested_by=$1`,
       [operatorId, id, tenantId, chatId]
     );
     const row = r.rows[0];
     return row?.text && row?.conversation_id ? { text: String(row.text), conversationId: String(row.conversation_id) } : null;
   });
+}
+
+/** Đánh dấu câu đã dùng (một lần). Gọi TRONG cùng transaction với việc lưu tin: lỗi giữa chừng thì rollback, nhân viên bấm lại được. */
+export async function danhDauCauDaGui(client: { query: (sql: string, params?: any[]) => Promise<any> },
+  tenantId: string, id: string, chatId: string, operatorId: string): Promise<boolean> {
+  const r = await client.query(
+    `UPDATE telegram_operator_action SET status='completed', confirmed_by=$1
+      WHERE id=$2 AND tenant_id=$3 AND telegram_chat_id=$4 AND action_type='forward_to_customer'
+        AND status='awaiting_confirmation' AND expires_at > now() AND requested_by=$1
+      RETURNING id`,
+    [operatorId, id, tenantId, chatId]
+  );
+  return r.rows.length === 1;
 }
 
 /** Hội thoại đã lưu có còn đúng là của nhân viên này, còn mở và đang do người trả lời không. */

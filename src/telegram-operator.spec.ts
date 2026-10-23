@@ -10,7 +10,7 @@ import {
   goiYDonHang, trongGiongLenh, laLenhGhiDonHang, canhBaoDeHieu,
   laYeuCauVanHanh, phanTichLenhNhanh, phanTichLenhDonHang, chonDonTheoSo, dinhDangTien,
   xuLyYeuCauVanHanh, xuLyCallbackVanHanh, phanTichLenhShop, parseTienVN, sinhMaGiamGia, GIOI_HAN_MA_GIAM,
-  tinhHanDung, chuanHoaMa, luuCauChoGui, layCauChoGui,
+  tinhHanDung, chuanHoaMa, luuCauChoGui, layCauChoGui, canGiuCauChoGui, danhDauCauDaGui, ghepTenBienThe, nhanNutChon,
 } from "./services/telegramOperator";
 import { guiTinQuaBot } from "./services/telegram";
 import { runInTenantContext } from "./db/client";
@@ -1460,7 +1460,176 @@ describe("Telegram operator: đơn hàng", () => {
     });
   });
 
+  describe("cổng tiếp quản: giữ lệnh ghi, gửi thẳng câu nói với khách", () => {
+    // Spec hai chiều. CAU_KHACH: nhân viên nhắn khách -> gửi thẳng. CAU_LENH: lệnh ghi (kể cả viết lệch) -> giữ/chặn kèm nút.
+    const CAU_KHACH: string[] = [
+      "chào anh, em là Linh bên shop rượu vang ạ",
+      "dạ chai Penfolds 389 giá 1.250.000đ ạ",
+      "giá chai này 500k ạ",
+      "bên em còn hàng anh nhé",
+      "dạ hết hàng chai này rồi anh ạ",
+      "em xác nhận đơn 12 cho anh rồi nhé",
+      "đơn 12 em huỷ cho chị rồi ạ",
+      "duyệt đơn 12 xong rồi anh nhé",
+      "mã giảm 10% nha anh",
+      "em gửi anh mã giảm 50k nhé",
+      "ship nội thành 30k, 2 ngày nhận hàng ạ",
+      "anh cho em xin địa chỉ nhận hàng nhé",
+      "dạ em đã nhận được tiền của anh rồi ạ",
+      "đơn 12 đã được duyệt rồi anh nhé",
+      "em gửi hàng hôm nay anh nhé",
+      "chai này vang đỏ Úc, 14 độ, hợp với bò nướng ạ",
+      "anh muốn lấy mấy chai ạ",
+      "giảm giá cho anh còn 1tr2 nhé",
+      "bên em giảm 10% khi mua 6 chai ạ",
+      "em tăng thêm 1 chai tặng anh nhé",
+      "dạ em kiểm tra tồn kho rồi báo anh nhé",
+      "em xuất hoá đơn cho anh nhé",
+      "chị chờ em một chút ạ",
+      "em cảm ơn anh nhiều",
+      "chai này ngừng bán rồi anh ạ",
+      "sản phẩm này tạm hết, tuần sau có lại nha chị",
+      "em ẩn giá cho anh được không ạ",
+      "dạ em nhập thêm hàng tuần sau, anh chờ nhé",
+      "đơn của anh em đã huỷ rồi ạ",
+      "đơn 12 của chị em duyệt rồi nhé",
+      "anh thanh toán chuyển khoản giúp em nhé",
+      "em đã nhận tiền đơn 12 rồi anh nhé",
+      "giá hôm nay đã đổi rồi anh ạ",
+      "mã giảm giá của anh dùng đến hết tháng này ạ",
+      "dạ em tạo đơn cho anh luôn nhé",
+      "anh cho em xin số điện thoại ạ",
+      "hàng sẽ giao trong ngày mai ạ",
+      "chai 2019 còn 3 chai ạ",
+      "em báo giá lại cho anh: 1tr5 nhé",
+      "vâng ạ, em hiểu rồi",
+      "đơn hàng của anh đang được đóng gói ạ",
+      "em xin lỗi vì sự bất tiện này ạ",
+      "anh nhận hàng kiểm tra giúp em nhé",
+      "dạ rượu này uống ngon nhất ở 16 độ ạ",
+      "tặng anh mã giảm 10% cho lần sau nhé",
+      "hiện bên em đang có khuyến mãi 2 chai giảm 100k ạ",
+      "em gửi ảnh chai để anh xem nhé",
+      "dạ vâng ạ",
+      "Tổng cộng 3 chai",
+      "Cộng 2 chai là 2tr4",
+      "Tăng 1 chai tặng 1 chai",
+      "Rượu nhập 2019 anh",
+      "Còn bao nhiêu chai anh cần ạ?",
+      "Bớt 2 chai được không anh",
+      "Xuất 2 chai cho anh nhé",
+      "Tồn kho chai này còn 5",
+      "Đơn hàng mới của anh em nhận rồi",
+      "Đơn của anh chưa duyệt ạ",
+      "Đơn anh đang chờ duyệt",
+      "Xem đơn 12 nhé",
+      "Anh check đơn 12 giúp em",
+      "Đơn 12 của anh đã duyệt",
+      "Doanh thu bên em ổn anh",
+      "Ăn với bò bít tết là ngon nhất",
+      "Ăn uống vui vẻ",
+      "An tâm anh nhé",
+      "An toàn tuyệt đối ạ",
+      "Ẩn danh người nhận được không anh?",
+      "Ẩn thông tin hoá đơn giúp anh nhé",
+      "Giấu quà trong hộp nhé",
+      "Huỷ đơn 12 cho anh nhé",
+      "Hoàn thành đơn 12 cho anh nhé",
+      "đổi giá chai này 1tr2 cho anh nhé",
+      "Giảm giá chai Penfolds còn 1200000 cho anh luôn",
+      "đổi giá Penfolds 389 còn 1200000 cho anh nha",
+      "tạo mã giảm 10% cho anh nhé",
+      "thêm mã giảm 50k cho chị nha",
+      "ngừng bán sản phẩm Penfolds 389 rồi anh"
+];
+    const CAU_LENH: string[] = [
+      "huỷ giúp đơn 12",
+      "đơn 12 huỷ",
+      "bot huỷ đơn 12",
+      "giảm giá Penfolds 389 còn 1200000",
+      "ẩn Penfolds Bin 389",
+      "nhập 10 chai Penfolds",
+      "xuất 2 chai Penfolds",
+      "tạo sản phẩm mới Vang X giá 500000",
+      "tạo mã giảm 10% nha anh",
+      "đổi giá Penfolds 389 1200000 nhé anh",
+      "đơn 12 duyệt",
+      "duyệt đơn 12",
+      "huỷ đơn 12",
+      "tạo mã giảm 10%",
+      "tạo voucher 50k",
+      "tạo mã voucher 50k",
+      "em huỷ đơn 12",
+      "ẩn sản phẩm Penfolds",
+      "ngừng bán sản phẩm Opus One",
+      "mở bán lại sản phẩm Opus One",
+      "đổi giá Opus One thành 850000",
+      "sửa giá Opus One 1tr25",
+      "đã nhận tiền đơn 12",
+      "nhận tiền đơn 12",
+      "vui lòng huỷ đơn 12",
+      "hiện lại sản phẩm Grange",
+      "nhập thêm 5 chai Opus One",
+      "tạo mã giảm 50k",
+      "xác nhận đơn 12",
+      "hoàn thành đơn 12",
+      "giấu sản phẩm Penfolds"
+];
+    const DUOC_PHEP_GIU = new Set(["dạ em kiểm tra tồn kho rồi báo anh nhé"]);
+
+    test("bộ câu khách: ≤ 3 câu bị giữ, và 0 câu trong danh sách 'giữ nhầm' đã biết", () => {
+      const giu = CAU_KHACH.filter(canGiuCauChoGui);
+      console.log(`[cổng giữ] câu khách bị giữ: ${giu.length}/${CAU_KHACH.length} ${JSON.stringify(giu)}`);
+      expect(CAU_KHACH.length).toBeGreaterThanOrEqual(77);
+      expect(giu.length).toBeLessThanOrEqual(3);
+      for (const c of CAU_KHACH.slice(48)) expect([c, canGiuCauChoGui(c)]).toEqual([c, false]);
+      for (const c of ["em xác nhận đơn 12 cho anh rồi nhé", "đơn 12 em huỷ cho chị rồi ạ", "duyệt đơn 12 xong rồi anh nhé", "giá chai này 500k ạ", "mã giảm 10% nha anh"]) {
+        expect(canGiuCauChoGui(c)).toBe(false);
+        expect(laLenhGhiDonHang(c)).toBe(false);
+      }
+    });
+
+    test("bộ lệnh: tất cả bị giữ hoặc chặn", () => {
+      const tha = CAU_LENH.filter((c) => !canGiuCauChoGui(c));
+      console.log(`[cổng giữ] câu lệnh bị giữ: ${CAU_LENH.length - tha.length}/${CAU_LENH.length}, lọt: ${JSON.stringify(tha)}`);
+      expect(CAU_LENH.length).toBeGreaterThanOrEqual(30);
+      expect(tha).toEqual([]);
+    });
+
+    test("7 câu nói với khách đuôi 'cho anh nhé / nha chị' không bị chặn nhầm (laLenhGhiDonHang)", () => {
+      for (const c of ["đổi giá chai này 1tr2 cho anh nhé", "đổi giá Penfolds 389 còn 1200000 cho anh nha", "tạo mã giảm 10% cho anh nhé",
+        "thêm mã giảm 50k cho chị nha", "ngừng bán sản phẩm Penfolds 389 rồi anh", "huỷ đơn 12 nhé anh", "xác nhận đơn 12 nhé chị"]) {
+        expect(laLenhGhiDonHang(c)).toBe(false);
+      }
+    });
+  });
+
+  describe("nhãn nút chọn biến thể", () => {
+    test("bỏ 'Default Title' và phần lặp tên sản phẩm", () => {
+      expect(ghepTenBienThe("Aureus Shiraz 2021", "Aureus Shiraz 2021 — Default Title")).toBe("Aureus Shiraz 2021");
+      expect(ghepTenBienThe("Aureus Shiraz 2021", "Default Title")).toBe("Aureus Shiraz 2021");
+      expect(ghepTenBienThe("Penfolds Bin 389", "Hộp gỗ 750ml")).toBe("Penfolds Bin 389 — Hộp gỗ 750ml");
+      expect(ghepTenBienThe("Château Castle", "Lẻ")).toBe("Château Castle — Lẻ");
+      expect(ghepTenBienThe("Penfolds Bin 389 2018", "2018")).toBe("Penfolds Bin 389 2018");
+      expect(ghepTenBienThe("Penfolds Bin 389", "2018")).toBe("Penfolds Bin 389 — 2018");
+    });
+    test("cắt 60 ký tự vẫn giữ SKU, giá và tên biến thể", () => {
+      const n = nhanNutChon("Penfolds Grange Shiraz Limited Edition Bin 95 — Hộp gỗ 750ml", "PF-GRANGE-95-750", "1.250.000đ");
+      expect(n.length).toBeLessThanOrEqual(60);
+      expect(n).toContain("(PF-GRANGE-95-750)");
+      expect(n).toContain("Hộp gỗ 750ml");
+      expect(n).toContain("1.250.000đ");
+      expect(nhanNutChon("Opus One", "OP1")).toBe("Opus One (OP1)");
+    });
+  });
+
   describe("nút 'Vẫn gửi cho khách' (cổng tiếp quản)", () => {
+    test("đánh dấu câu đã dùng chỉ khi UPDATE trúng đúng 1 dòng", async () => {
+      const q = jest.fn(async () => ({ rows: [{ id: UUID }], rowCount: 1 }));
+      expect(await danhDauCauDaGui({ query: q }, "tenant-1", UUID, "7", "9")).toBe(true);
+      expect((q.mock.calls[0] as any[])[0]).toContain("status='awaiting_confirmation'");
+      expect(await danhDauCauDaGui({ query: async () => ({ rows: [], rowCount: 0 }) }, "tenant-1", UUID, "7", "9")).toBe(false);
+    });
     test("lưu câu bị chặn với loại forward_to_customer, trả id để gắn vào nút", async () => {
       const id = await luuCauChoGui("tenant-1", "7", "9", "tạo mã cho chị nhé, chị dùng được 3 hôm", "conv-A", "55");
       expect(id).toBe(UUID);
@@ -1471,7 +1640,7 @@ describe("Telegram operator: đơn hàng", () => {
       expect(`ops_send_${id}`.length).toBeLessThanOrEqual(64);
     });
 
-    test("lấy câu đã lưu: chỉ đúng người gõ, đúng chat, còn hạn, dùng một lần", async () => {
+    test("đọc câu đã lưu: chỉ đúng người gõ, đúng chat, còn hạn (chưa đánh dấu đã dùng)", async () => {
       (runInTenantContext as jest.Mock).mockImplementation(async (_t: string, fn: any) => fn({
         query: async (sql: string, params: any[] = []) => {
           sqlCalls.push({ sql, params });
@@ -1484,6 +1653,7 @@ describe("Telegram operator: đơn hàng", () => {
       expect(c.sql).toContain("status='awaiting_confirmation'");
       expect(c.sql).toContain("expires_at > now()");
       expect(c.sql).toContain("requested_by=$1");
+      expect(c.sql).not.toMatch(/UPDATE/);
       expect(c.params).toEqual(["9", UUID, "tenant-1", "7"]);
       (runInTenantContext as jest.Mock).mockImplementation(async (_t: string, fn: any) => fn({ query: async () => ({ rows: [], rowCount: 0 }) }));
       expect(await layCauChoGui("tenant-1", UUID, "7", "10")).toBeNull();
