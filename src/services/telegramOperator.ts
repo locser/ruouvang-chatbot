@@ -7,8 +7,10 @@ import { goiDeepSeekCoTool, ChatMessageTool } from "./llm";
 import { layCaiDat } from "./caiDat";
 import { fetchCoTimeout, fetchJson, TIMEOUT } from "./http";
 import { env } from "../config/env";
+import { randomInt } from "crypto";
 
-type LoaiLenh = "inventory_adjust" | "create_product" | "inventory_lookup" | "order_list_pending" | "order_complete" | "order_lookup" | "order_payment_received" | "order_cancel" | "revenue_report";
+type LoaiLenh = "inventory_adjust" | "create_product" | "inventory_lookup" | "order_list_pending" | "order_complete" | "order_lookup" | "order_payment_received" | "order_cancel" | "revenue_report"
+  | "discount_create" | "product_hide" | "product_show" | "product_price" | "price_update" | "forward_to_customer";
 
 export interface LenhVanHanh {
   type: LoaiLenh;
@@ -29,7 +31,23 @@ export interface LenhVanHanh {
   report_days?: number;
   /** Mốc lịch theo giờ VN do backend tính: hôm nay / tuần này / tháng này. */
   report_period?: "today" | "this_week" | "this_month";
+  /** Tạo mã giảm giá: đúng một trong percent / amount. */
+  discount_percent?: number;
+  discount_amount?: number;
+  discount_code?: string;
+  /** Hạn dùng của mã: ngày cụ thể (năm có thể thiếu) hoặc "trong N ngày"; giới hạn số lượt dùng. */
+  han_ngay?: { d: number; m: number; y?: number };
+  han_so_ngay?: number;
+  usage_limit?: number;
+  /** Số trần nhỏ không đơn vị ("giảm 10"): phải hỏi lại 10% hay 10.000đ. */
+  so_tran?: number;
+  /** Câu có ý tạo mã nhưng không hiểu hết: lý do để báo nhân viên (không được rơi sang nhánh khác). */
+  loi_hieu?: string;
+  price_vnd_moi?: number;
 }
+
+/** Giới hạn cứng phía bot cho mã giảm giá (backend không tự chặn; chưa có cấu hình app_settings). */
+export const GIOI_HAN_MA_GIAM = { toi_da_phan_tram: 30, toi_da_so_tien: 500_000, toi_thieu_so_tien: 1_000 } as const;
 
 interface TelegramMessageLike {
   message_id?: string | number;
@@ -55,9 +73,10 @@ const CALLBACK_PAY_RE = /^ops_pay_(\d{1,9})$/;
 const CALLBACK_REPORT_RE = /^ops_rep_(1|7|30|today|this_week|this_month)$/;
 const CALLBACK_XEM_RE = /^ops_view_(\d{1,9})$/;
 const CALLBACK_HUY_RE = /^ops_cxl_(\d{1,9})$/;
+const CALLBACK_MA_RE = /^ops_dsc_(p|a)(\d{1,7})$/;
 const CALLBACK_RE = new RegExp(`^ops_(ok|no|pick)_(${UUID_RE})(?:_(\\d+))?$`, "i");
 
-function html(v: unknown): string {
+export function html(v: unknown): string {
   return String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
@@ -148,6 +167,177 @@ function phanTichHuyDon(plain: string, goc: string): LenhVanHanh | null {
   if (m[1].startsWith("0")) return null;
   const n = Number(m[1]);
   return Number.isSafeInteger(n) && n > 0 ? { type: "order_cancel", order_number: n } : null;
+}
+
+/**
+ * Số tiền kiểu Việt: "50k", "1tr25", "1.250k", "1,25 triệu", "1.250.000", "500000đ".
+ * Trả số đồng nguyên, hoặc null nếu không hiểu.
+ */
+export function parseTienVN(raw: string): number | null {
+  const s = boDau(raw).replace(/\s+/g, "").replace(/(?:dong|vnd|d)$/, "");
+  let m: RegExpMatchArray | null;
+  let kq: number | null = null;
+  if ((m = s.match(/^(\d+)(?:tr|trieu|m)(\d{1,3})$/))) kq = Math.round(Number(m[1]) * 1e6 + Number(`0.${m[2]}`) * 1e6);
+  else if ((m = s.match(/^(\d+(?:[.,]\d+)?)(?:tr|trieu|m)$/))) kq = Math.round(Number(m[1].replace(",", ".")) * 1e6);
+  else if ((m = s.match(/^(\d{1,3}(?:[.,]\d{3})+)(?:k|nghin|ngan)$/))) kq = Number(m[1].replace(/[.,]/g, "")) * 1000;
+  else if ((m = s.match(/^(\d+(?:[.,]\d+)?)(?:k|nghin|ngan)$/))) kq = Math.round(Number(m[1].replace(",", ".")) * 1000);
+  else if ((m = s.match(/^(\d{1,3}(?:[.,]\d{3})+)$/))) kq = Number(m[1].replace(/[.,]/g, ""));
+  else if ((m = s.match(/^(\d+)$/))) kq = Number(m[1]);
+  return kq !== null && Number.isSafeInteger(kq) && kq >= 0 && kq <= 1e12 ? kq : null;
+}
+
+const MAU_TIEN = "\\d[\\d.,]*(?:\\s*(?:trieu|tr|m)\\s*\\d{0,3}|\\s*(?:k|nghin|ngan)|\\s*(?:dong|vnd|d))?";
+const TU_LOT = new Set(["nhe", "nha", "ne", "di", "ngay", "a", "voi", "luon", "giup", "gium", "dum", "em", "minh", "anh", "chi", "vui", "long", "nho", "hay", "cho", "khach", "moi", "mot", "oi"]);
+
+/** Câu hỏi hoặc ngập ngừng ("...?", "... à", "... không"): không bao giờ là lệnh ghi. */
+function laCauHoi(goc: string): boolean {
+  return /\?/.test(goc) || /(?:^|\s)(?:à|ả|hả|hở|không|khong|chưa|chua)\s*[.!,;:…]*$/i.test(goc.trim());
+}
+
+/**
+ * Hạn dùng của mã: 23:59:59 giờ Việt Nam của ngày đó. Ngày không có năm mà đã qua thì hiểu là năm sau.
+ * Ném LoiThanThien nếu ngày không có thật, đã qua (có ghi năm) hoặc xa quá 1 năm.
+ */
+export function tinhHanDung(spec: { ngay?: { d: number; m: number; y?: number }; soNgay?: number }, now: Date = new Date()): { ends_at: string; nhan: string } {
+  const vn = new Date(now.getTime() + 7 * 3600_000);
+  const homNay = Date.UTC(vn.getUTCFullYear(), vn.getUTCMonth(), vn.getUTCDate());
+  let moc: number;
+  if (spec.soNgay != null) {
+    moc = homNay + spec.soNgay * 86400_000;
+  } else if (spec.ngay) {
+    let { d, m, y } = spec.ngay;
+    const coNam = y != null;
+    if (y != null && y < 100) y += 2000;
+    let yy = y ?? vn.getUTCFullYear();
+    const hopLe = (nam: number) => { const t = new Date(Date.UTC(nam, m - 1, d)); return t.getUTCFullYear() === nam && t.getUTCMonth() === m - 1 && t.getUTCDate() === d; };
+    if (!hopLe(yy)) throw new LoiThanThien(`Ngày ${d}/${m} không có thật. Anh/chị kiểm tra lại ngày hết hạn giúp em.`);
+    moc = Date.UTC(yy, m - 1, d);
+    if (moc < homNay) {
+      if (coNam) throw new LoiThanThien(`Ngày hết hạn ${d}/${m}/${yy} đã qua rồi. Anh/chị cho em ngày ở tương lai nhé.`);
+      yy += 1;
+      if (!hopLe(yy)) throw new LoiThanThien(`Ngày ${d}/${m} không có thật. Anh/chị kiểm tra lại ngày hết hạn giúp em.`);
+      moc = Date.UTC(yy, m - 1, d);
+    }
+  } else throw new LoiThanThien("Thiếu ngày hết hạn.");
+  if (moc - homNay > 366 * 86400_000) throw new LoiThanThien("Hạn dùng xa quá 1 năm, em chưa đặt được. Anh/chị cho hạn ngắn hơn nhé.");
+  const t = new Date(moc);
+  const h = (n: number) => String(n).padStart(2, "0");
+  const dd = h(t.getUTCDate()), mm = h(t.getUTCMonth() + 1), yyyy = t.getUTCFullYear();
+  return { ends_at: `${yyyy}-${mm}-${dd}T23:59:59+07:00`, nhan: `23:59 ${dd}/${mm}/${yyyy}` };
+}
+
+const LOI_MA_CHUNG = "Em chỉ tạo mã giảm theo % hoặc số tiền, kèm hạn (hết hạn 31/12, trong 7 ngày) và số lượt (dùng 50 lần).";
+const loiMa = (loi_hieu: string): LenhVanHanh => ({ type: "discount_create", loi_hieu });
+
+/** Câu có ý tạo mã giảm giá mà bot không hiểu hết: phải từ chối rõ, không được rơi sang nhánh kho. */
+export function coYTaoMaGiam(plain: string): boolean {
+  return /\b(?:tao|them)\s+(?:ma|voucher|coupon)\b/.test(plain) || /(?:^|\s)ma\s+(?:giam|khuyen mai|uu dai)\b/.test(plain) ||
+    /\bgiam(?:\s+gia)?\s*\d[\d.,]*\s*(?:%|phan\s*tram)/.test(plain) ||
+    /\bgiam(?:\s+gia)?\s*\d[\d.,]*\s*(?:k|nghin|ngan|tr|trieu|d|dong|vnd)\b/.test(plain);
+}
+
+/** Tạo mã giảm giá. Neo đầu câu ("tạo mã ..."); đã có ý tạo mã mà không hiểu hết thì trả lệnh mang `loi_hieu`. */
+function phanTichMaGiam(text: string, plain: string): LenhVanHanh | null {
+  let r = plain.replace(/[?!.,;:\s]+$/g, "");
+  const dau = r.match(/^(?:(?:vui long|nho|hay|giup em|giup minh|cho em|cho minh|em can|anh oi|chi oi|em oi|oi)\s+)*(?:tao|them)\s+(?:ma|voucher|coupon)\b/);
+  if (!dau) return null;
+  if (laCauHoi(text)) return loiMa("Câu này em thấy là câu hỏi nên chưa tạo mã. Anh/chị gõ lại dạng lệnh, ví dụ: tạo mã giảm 10%.");
+  r = r.slice(dau[0].length).replace(/;|(?<!\d),|,(?!\d)/g, " ");
+  const kq: LenhVanHanh = { type: "discount_create" };
+  // Mã tự đặt: lấy từ chữ gốc ("tạo mã TET10 ..."), phải viết HOA hoặc có chữ số.
+  const mMa = text.match(/(?:^|\s)(?:m[ãa]|voucher|coupon)\s+([A-Za-z0-9_-]{3,20})(?=\s|$)/i);
+  if (mMa && !["giam", "khuyen", "uu", "gia", "het", "han", "cho", "moi", "trong", "den", "dung", "toi", "nhe", "nha", "di", "ne", "hom", "nay", "hang", "tuan", "thang", "mua", "dong", "tien", "phan", "tram", "nhanh", "sinh", "nhat", "tu", "cua", "va", "de", "cac", "mot", "lan", "luot", "san", "pham", "hom"].includes(boDau(mMa[1]).toLowerCase())) {
+    kq.discount_code = mMa[1].toUpperCase();
+    r = r.replace(boDau(mMa[1]).toLowerCase(), " ");
+  }
+  const ngay = r.match(/(?:het han|han dung|han su dung|dung den|den het|den ngay|den|han)\s*(?:vao\s+|ngay\s+)?(\d{1,2})[\/-](\d{1,2})(?:[\/-](\d{2,4}))?/);
+  if (ngay) {
+    kq.han_ngay = { d: Number(ngay[1]), m: Number(ngay[2]), y: ngay[3] ? Number(ngay[3]) : undefined };
+    r = r.replace(ngay[0], " ");
+  } else {
+    const tuongDoi = r.match(/(?:het han trong|het han sau|dung trong|trong|han)\s+(\d{1,3})\s*(ngay|tuan|thang)\b/);
+    if (tuongDoi) {
+      const n = Number(tuongDoi[1]);
+      kq.han_so_ngay = n * (tuongDoi[2] === "tuan" ? 7 : tuongDoi[2] === "thang" ? 30 : 1);
+      r = r.replace(tuongDoi[0], " ");
+    }
+  }
+  const luot = r.match(/(?:chi\s+)?(?:dung\s+)?(?:duoc\s+)?(?:toi da\s+)?(\d{1,6})\s*(?:lan|luot)\b|gioi han\s+(\d{1,6})(?:\s*(?:lan|luot))?\b/);
+  if (luot) {
+    kq.usage_limit = Number(luot[1] ?? luot[2]);
+    r = r.replace(luot[0], " ");
+  }
+  r = r.replace(/\b(?:giam gia|khuyen mai|uu dai)\b(?!\s*\d)/, "giam");
+  const pct = r.match(/\bgiam(?:\s+gia)?\s*(\d{1,3}(?:[.,]\d+)?)\s*(?:%|phan\s*tram)/);
+  if (pct) {
+    kq.discount_percent = Number(pct[1].replace(",", "."));
+    r = r.replace(pct[0], " ");
+  } else {
+    const tien = r.match(new RegExp(`\\bgiam(?:\\s+gia)?\\s+(${MAU_TIEN})(?!\\s*%)`));
+    const v = tien ? parseTienVN(tien[1]) : null;
+    if (!tien || v === null) return loiMa(`Em chưa hiểu mức giảm. Anh/chị gõ ví dụ: tạo mã giảm 10% hoặc tạo mã giảm 50k. ${LOI_MA_CHUNG}`);
+    // Số trần nhỏ không đơn vị ("giảm 10"): hỏi lại 10% hay 10.000đ, không đoán.
+    if (/^\d{1,3}$/.test(tien[1].trim()) && v <= 100) kq.so_tran = v;
+    else kq.discount_amount = v;
+    r = r.replace(tien[0], " ");
+  }
+  const du = r.split(/\s+/).filter(Boolean).filter((w) => !TU_LOT.has(w) && w !== "giam" && w !== "gia" && w !== "ma");
+  if (du.length) return loiMa(`Em chưa hỗ trợ điều kiện “${du.join(" ")}” cho mã giảm giá nên chưa tạo. ${LOI_MA_CHUNG}`);
+  return kq;
+}
+
+/** Cắt phần tiền tố lệnh để lấy tên sản phẩm (giữ nguyên chữ hoa/dấu), bỏ chữ "sản phẩm/sp" đứng đầu tên. */
+function layTenSauTienTo(text: string, plain: string, tienTo: RegExp): string | null {
+  const m = plain.match(tienTo);
+  if (!m) return null;
+  const tu = text.split(/\s+/).filter(Boolean);
+  const tuPlain = plain.split(/\s+/).filter(Boolean);
+  if (tu.length !== tuPlain.length) return null;
+  const k = m[0].trim().split(/\s+/).length;
+  const con = tu.slice(k);
+  while (con.length > 1 && /^(?:san|pham|sp)$/.test(boDau(con[0]))) con.shift();
+  while (con.length && TU_LOT.has(boDau(con[con.length - 1]).replace(/[^a-z0-9]/g, ""))) con.pop();
+  return con.join(" ").replace(/[?!.,;:]+$/g, "").trim();
+}
+
+/**
+ * Ẩn / mở bán lại sản phẩm, đổi giá. Chỉ nhận dạng lệnh có động từ rõ VÀ chữ "sản phẩm/sp" (ẩn, ngừng bán, mở bán lại)
+ * hoặc "đổi/sửa giá": câu thường nói với khách ("giá chai này 500k ạ", "ngừng bán rồi anh ạ") không bao giờ khớp.
+ */
+function phanTichSanPham(text: string, plain: string): LenhVanHanh | null {
+  if (laCauHoi(text)) return null;
+  const dem = "(?:(?:vui long|nho|hay|giup em|giup minh|cho em|cho minh|anh oi|chi oi|em oi|oi)\\s+)*";
+  const sp = "(?:san pham|sp)";
+  const hopLe = (ten: string | null): ten is string => Boolean(ten) && ten!.length >= 2 && ten!.length <= 80 &&
+    !/^(?:hang|nhe|het|luon|vi|do|tu|rieng|sang|chieu|toi|hom|mai|tuan|thang|nay|kia|moi|la|thanh|gia)\b/.test(boDau(ten!));
+  const an = layTenSauTienTo(text, plain, new RegExp(`^${dem}(?:(?:an|giau|tat ban)\\s+${sp}|(?:tam )?ngung ban\\s+${sp}|ngung kinh doanh\\s+${sp})\\s+(?=\\S)`));
+  if (hopLe(an)) return { type: "product_hide", product_query: an };
+  const hien = layTenSauTienTo(text, plain, new RegExp(`^${dem}(?:mo ban lai\\s+${sp}|mo lai ban\\s+${sp}|hien lai san pham|hien san pham|bat lai san pham)\\s+(?=\\S)`));
+  if (hopLe(hien)) return { type: "product_show", product_query: hien };
+  const tuPlain = plain.replace(/[?!.,;:\s]+$/g, "").split(/\s+/);
+  while (tuPlain.length && TU_LOT.has(tuPlain[tuPlain.length - 1])) tuPlain.pop();
+  const mGia = tuPlain.join(" ").match(new RegExp(`^${dem}(?:doi gia|sua gia|cap nhat gia)\\s+(.+?)\\s+(?:thanh|la|=|->|moi)?\\s*(${MAU_TIEN})\\s*$`));
+  if (mGia) {
+    const v = parseTienVN(mGia[2]);
+    const ten = layTenSauTienTo(text, plain, new RegExp(`^${dem}(?:doi gia|sua gia|cap nhat gia)\\s+(?=\\S)`));
+    if (v !== null && v >= 1000 && ten !== null) {
+      const tu = ten.split(/\s+/);
+      const soTuTien = mGia[2].trim().split(/\s+/).length;
+      let tenSp = tu.slice(0, Math.max(0, tu.length - soTuTien));
+      while (tenSp.length && /^(?:thanh|la|moi|=|->)$/.test(boDau(tenSp[tenSp.length - 1]))) tenSp = tenSp.slice(0, -1);
+      const t = tenSp.join(" ").trim();
+      if (hopLe(t)) return { type: "product_price", product_query: t, price_vnd: v };
+    }
+  }
+  return null;
+}
+
+/** Lệnh ghi về cửa hàng (mã giảm giá, ẩn/hiện sản phẩm, đổi giá). */
+export function phanTichLenhShop(raw: string): LenhVanHanh | null {
+  const text = boTienTo(raw);
+  if (!text || text.length > 160) return null;
+  const plain = boDau(text);
+  return phanTichMaGiam(text, plain) ?? phanTichSanPham(text, plain);
 }
 
 /** Nhận tiền chuyển khoản ("đã nhận tiền đơn 12", "đơn 12 đã ck") và báo cáo doanh thu ("doanh thu 7 ngày"): neo cả câu. */
@@ -294,6 +484,34 @@ export function goiYDonHang(raw: string, laChatRieng: boolean): { text: string; 
       reply_markup: { inline_keyboard: ds.map((n) => [{ text: `❌ Huỷ đơn #${n}`, callback_data: `ops_cxl_${n}` }]) },
     };
   }
+  // Mã giảm giá / ẩn-hiện / đổi giá: chỉ ghi qua /ops; ở chat riêng thì gợi ý (mã không đặt tên thì có nút).
+  if (laChatRieng) {
+    const shop = phanTichLenhShop(raw);
+    const dscDon = shop?.type === "discount_create" && !shop.loi_hieu && !shop.discount_code && !shop.han_ngay && !shop.han_so_ngay && shop.usage_limit == null;
+    if (dscDon && shop) {
+      const g = GIOI_HAN_MA_GIAM;
+      const nut = (cb: string, nhan: string) => [{ text: `🎟 Tạo mã giảm ${nhan}`, callback_data: cb }];
+      const dong: Array<Array<{ text: string; callback_data: string }>> = [];
+      const pc = shop.discount_percent;
+      if (pc != null && Number.isInteger(pc) && pc >= 1 && pc <= g.toi_da_phan_tram) dong.push(nut(`ops_dsc_p${pc}`, `${pc}%`));
+      const am = shop.discount_amount;
+      if (am != null && am >= g.toi_thieu_so_tien && am <= g.toi_da_so_tien) dong.push(nut(`ops_dsc_a${am}`, dinhDangTien(am)));
+      if (shop.so_tran != null) {
+        const n = shop.so_tran;
+        if (n >= 1 && n <= g.toi_da_phan_tram) dong.push(nut(`ops_dsc_p${n}`, `${n}%`));
+        if (n * 1000 >= g.toi_thieu_so_tien && n * 1000 <= g.toi_da_so_tien) dong.push(nut(`ops_dsc_a${n * 1000}`, dinhDangTien(n * 1000)));
+      }
+      // Mức ngoài giới hạn: không có nút, đi tiếp xuống gợi ý /ops để bot giải thích giới hạn.
+      if (dong.length) {
+        return {
+          text: shop.so_tran != null ? `“${shop.so_tran}” là ${shop.so_tran}% hay ${dinhDangTien(shop.so_tran * 1000)}? Em sẽ tự sinh mã và hỏi xác nhận trước khi tạo.`
+            : `Anh/chị muốn tạo mã giảm ${pc != null ? `${pc}%` : dinhDangTien(am)} phải không? Em sẽ tự sinh mã và hỏi xác nhận trước khi tạo.`,
+          reply_markup: { inline_keyboard: dong },
+        };
+      }
+    }
+    if (shop) return { text: `Muốn em làm việc này, anh/chị gõ: /ops ${html(text)}\n(Em sẽ lập bản nháp và hỏi xác nhận trước khi thay đổi.)` };
+  }
   if (/\b(?:doanh\s+thu|doanh\s+so)\b/.test(plain) || (laChatRieng && /\bbao\s+cao\b/.test(plain))) {
     return { text: "Anh/chị muốn xem doanh thu trong bao lâu?", reply_markup: { inline_keyboard: [nutBaoCao()] } };
   }
@@ -319,14 +537,15 @@ export function goiYDonHang(raw: string, laChatRieng: boolean): { text: string; 
     };
   }
   if (laChatRieng && /\bdon\b/.test(plain)) {
-    return { text: "Anh/chị gõ “đơn mới” để xem đơn chờ duyệt, “duyệt đơn 12”, “đã nhận tiền đơn 12” “huỷ đơn 12” hoặc “doanh thu 7 ngày”." };
+    return { text: "Anh/chị gõ “đơn mới” để xem đơn chờ duyệt, “duyệt đơn 12”, “đã nhận tiền đơn 12” “huỷ đơn 12”, “tạo mã giảm 10%”, “ẩn sản phẩm X” hoặc “doanh thu 7 ngày”." };
   }
   return null;
 }
 
 /** Câu trông giống một lệnh (đơn hoặc kho) — dùng để nhắc nhân viên đang tiếp quản gõ /ops. */
 export function trongGiongLenh(raw: string): boolean {
-  return phanTichLenhNhanh(raw) !== null || goiYDonHang(raw, false) !== null;
+  const l = phanTichLenhNhanh(raw);
+  return (l !== null && !l.loi_hieu) || goiYDonHang(raw, false) !== null;
 }
 
 /** Parser chắc chắn cho các câu kho phổ biến; câu tự do hơn sẽ đi qua LLM. */
@@ -336,6 +555,11 @@ export function phanTichLenhNhanh(raw: string): LenhVanHanh | null {
 
   const donHang = phanTichLenhDonHang(raw);
   if (donHang) return donHang;
+  // Phải đứng trước nhánh kho: "giảm 10%" sẽ bị hiểu nhầm là xuất kho.
+  const shop = phanTichLenhShop(raw);
+  if (shop) return shop;
+  // Có ý tạo mã / có % giảm mà không hiểu: từ chối rõ, tuyệt đối không để "giảm N" rơi sang trừ kho.
+  if (coYTaoMaGiam(plain)) return loiMa(`Em chưa hiểu mức giảm. Muốn tạo mã giảm giá, anh/chị gõ ví dụ: tạo mã giảm 10% hoặc tạo mã giảm 50k. ${LOI_MA_CHUNG}`);
 
   // Ưu tiên ý định tạo mới trước từ "nhập": câu "tạo sản phẩm mới X, nhập
   // 12 chai" không được hiểu nhầm là cộng kho cho một sản phẩm đã có.
@@ -356,8 +580,8 @@ export function phanTichLenhNhanh(raw: string): LenhVanHanh | null {
     };
   }
 
-  const tang = plain.match(/(?:moi\s+nhap|nhap(?:\s+kho)?|tang|cong)(?:\s+them)?\s*(\d{1,6})\s*(?:chai|hop|thung|san\s*pham|sp)?/i);
-  const giam = plain.match(/(?:xuat|giam|bot|tru)(?:\s+kho|\s+di|\s+them)?\s*(\d{1,6})\s*(?:chai|hop|thung|san\s*pham|sp)?/i);
+  const tang = plain.match(/(?:moi\s+nhap|nhap(?:\s+kho)?|tang|cong)(?:\s+them)?\s*(\d{1,6})(?!\d|\s*%|\s*phan\s*tram|\s*(?:k|nghin|ngan|tr|trieu|d|dong|vnd)\b)\s*(?:chai|hop|thung|san\s*pham|sp)?/i);
+  const giam = plain.match(/(?:xuat|giam|bot|tru)(?:\s+kho|\s+di|\s+them)?\s*(\d{1,6})(?!\d|\s*%|\s*phan\s*tram|\s*(?:k|nghin|ngan|tr|trieu|d|dong|vnd)\b)\s*(?:chai|hop|thung|san\s*pham|sp)?/i);
   const thayDoi = tang || giam;
   if (thayDoi) {
     const so = Number(thayDoi[1]) * (giam ? -1 : 1);
@@ -382,8 +606,28 @@ export function phanTichLenhNhanh(raw: string): LenhVanHanh | null {
   return null;
 }
 
-/** Câu khớp lệnh GHI về đơn (huỷ / duyệt / nhận tiền): khi đang tiếp quản khách không được gửi câu này cho khách. */
+const DEM_LENH = "(?:(?:vui long|nho|hay|giup em|giup minh|cho em|cho minh|anh oi|chi oi|em oi|oi)\\s+)*";
+const MO_DAU_LENH_DON = new RegExp(`^${DEM_LENH}(?:duyet don|xac nhan don|hoan thanh don|huy don|xac nhan da nhan tien|(?:da\\s+)?(?:nhan|thu)(?:\\s+duoc)?\\s+tien|ghi nhan tien)\\b`);
+const MO_DAU_LENH_SHOP = new RegExp(`^${DEM_LENH}(?:(?:tao|them)\\s+(?:ma|voucher|coupon)|(?:an|giau|tat ban)\\s+(?:san pham|sp)|(?:tam\\s+)?ngung ban\\s+(?:san pham|sp)|mo ban lai\\s+(?:san pham|sp)|hien lai san pham|hien san pham|bat lai san pham|ngung kinh doanh\\s+(?:san pham|sp)|(?:doi|sua|cap nhat)\\s+gia)\\b`);
+
+/**
+ * Cổng tiếp quản khách: chỉ chặn câu MỞ ĐẦU bằng động từ mệnh lệnh rõ (duyệt/huỷ đơn, đã nhận tiền đơn,
+ * tạo mã, ẩn / ngừng bán / mở bán lại sản phẩm, đổi/sửa giá). Câu nói với khách ("giá bên em 1tr5 ạ",
+ * "mã giảm 10% nha anh", "ngừng bán rồi anh ạ") không bị chặn nhầm.
+ */
 export function laLenhGhiDonHang(raw: string): boolean {
+  const plain = boDau(boTienTo(raw));
+  const mShop = plain.match(MO_DAU_LENH_SHOP);
+  if (mShop) {
+    // Câu kết bằng "nha/nhé anh/chị", "anh/chị ạ" hay có "rồi" ngay sau động từ là lời nói với khách.
+    const gon = plain.replace(/[?!.,;:\s]+$/g, "");
+    if (/\s(?:nha|nhe)\s+(?:anh|chi)$/.test(gon) || /\s(?:anh|chi)\s+a$/.test(gon)) return false;
+    if (/^\s*(?:nay\s+)?roi\b/.test(plain.slice(mShop[0].length))) return false;
+    // Chỉ chặn khi bot thật sự hiểu đây là lệnh hợp lệ; câu bot không hiểu thì để đi tiếp như lời nói với khách.
+    const l = phanTichLenhShop(raw);
+    return Boolean(l && !l.loi_hieu);
+  }
+  if (!MO_DAU_LENH_DON.test(plain)) return false;
   const t = phanTichLenhDonHang(raw)?.type;
   return t === "order_cancel" || t === "order_complete" || t === "order_payment_received";
 }
@@ -479,6 +723,36 @@ const OPERATOR_TOOLS = [
   {
     type: "function",
     function: {
+      name: "discount_create",
+      description: "Tạo mã giảm giá cho cả đơn: percent (%) HOẶC amount (đồng), chỉ một trong hai; code tuỳ chọn. Chỉ khi nhân viên yêu cầu rõ ('tạo mã giảm 10%').",
+      parameters: { type: "object", additionalProperties: false, properties: {
+        percent: { type: "number" }, amount: { type: "integer" }, code: { type: "string" },
+      } },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "product_visibility",
+      description: "Ẩn sản phẩm khỏi cửa hàng (visible=false: 'ẩn sản phẩm X', 'ngừng bán X') hoặc mở bán lại (visible=true). product_query là tên sản phẩm nguyên văn trong câu.",
+      parameters: { type: "object", additionalProperties: false, properties: {
+        product_query: { type: "string" }, visible: { type: "boolean" },
+      }, required: ["product_query", "visible"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "product_price",
+      description: "Đổi giá bán (VND) của một sản phẩm khi nhân viên ra lệnh rõ 'đổi giá X thành N'. product_query là tên nguyên văn trong câu, price_vnd là số đồng xuất hiện trong câu.",
+      parameters: { type: "object", additionalProperties: false, properties: {
+        product_query: { type: "string" }, price_vnd: { type: "integer", minimum: 1000 },
+      }, required: ["product_query", "price_vnd"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "revenue_report",
       description: "Báo cáo doanh thu (chỉ đọc). 'hôm nay' = period today, 'tuần này' = this_week, 'tháng này' = this_month; 'N ngày' = days.",
       parameters: { type: "object", additionalProperties: false, properties: {
@@ -499,7 +773,7 @@ async function phanTichBangAi(text: string): Promise<LenhVanHanh | null> {
   ];
   const kq = await goiDeepSeekCoTool(messages, OPERATOR_TOOLS as unknown as object[]);
   const call = kq.tool_calls?.[0];
-  if (!call || !["inventory_adjust", "inventory_lookup", "create_product", "order_list_pending", "order_complete", "order_lookup", "order_payment_received", "revenue_report"].includes(call.function.name)) return null;
+  if (!call || !["inventory_adjust", "inventory_lookup", "create_product", "order_list_pending", "order_complete", "order_lookup", "order_payment_received", "revenue_report", "discount_create", "product_visibility", "product_price"].includes(call.function.name)) return null;
   try {
     const p = JSON.parse(call.function.arguments || "{}");
     if (call.function.name === "order_complete") {
@@ -511,6 +785,39 @@ async function phanTichBangAi(text: string): Promise<LenhVanHanh | null> {
     if (call.function.name === "order_payment_received") {
       const n = Number(p.order_number);
       return Number.isSafeInteger(n) && n > 0 ? { type: "order_payment_received", order_number: n } : null;
+    }
+    if (call.function.name === "discount_create") {
+      // Số LLM đưa phải xuất hiện trong câu gốc; chỉ nhận một loại mức giảm.
+      const pc = p.percent != null ? Number(p.percent) : undefined;
+      const am = p.amount != null ? Number(p.amount) : undefined;
+      if ((pc == null) === (am == null)) return null;
+      const plainGoc = boDau(text);
+      const soTrongCau = new Set<number>();
+      for (const m of plainGoc.matchAll(new RegExp(MAU_TIEN, "g"))) { const v = parseTienVN(m[0]); if (v !== null) soTrongCau.add(v); }
+      for (const m of plainGoc.matchAll(/(\d{1,3}(?:[.,]\d+)?)\s*(?:%|phan\s*tram)/g)) soTrongCau.add(Number(m[1].replace(",", ".")));
+      if (pc != null && (!Number.isFinite(pc) || !soTrongCau.has(pc) || !/%|phan\s*tram/.test(plainGoc))) return null;
+      if (am != null && (!Number.isSafeInteger(am) || !soTrongCau.has(am))) return null;
+      const tuNguyen = new Set(plainGoc.split(/[^a-z0-9_-]+/).filter(Boolean));
+      const code = typeof p.code === "string" && /^[A-Za-z0-9_-]{3,20}$/.test(p.code) && tuNguyen.has(p.code.toLowerCase()) ? p.code.toUpperCase() : undefined;
+      return { type: "discount_create", discount_percent: pc, discount_amount: am, discount_code: code };
+    }
+    if (call.function.name === "product_price") {
+      const q = String(p.product_query ?? "").trim().slice(0, 80);
+      const gia = Number(p.price_vnd);
+      const plainGoc = boDau(text);
+      const tuQ = boDau(q).split(/\s+/).filter(Boolean);
+      const soTrongCau = new Set<number>();
+      for (const m of plainGoc.matchAll(new RegExp(MAU_TIEN, "g"))) { const v = parseTienVN(m[0]); if (v !== null) soTrongCau.add(v); }
+      // Bắt buộc có "đổi/sửa giá" trong câu, giá LLM đưa phải có trong câu gốc, tên phải có trong câu.
+      if (!q || !Number.isSafeInteger(gia) || gia < 1000 || !soTrongCau.has(gia) || !/\b(?:doi|sua|cap nhat)\s+gia\b/.test(plainGoc) ||
+        !tuQ.every((w) => plainGoc.includes(w))) return null;
+      return { type: "product_price", product_query: q, price_vnd: gia };
+    }
+    if (call.function.name === "product_visibility") {
+      const q = String(p.product_query ?? "").trim().slice(0, 80);
+      const tuQ = boDau(q).split(/\s+/).filter(Boolean);
+      if (!q || typeof p.visible !== "boolean" || !tuQ.every((w) => boDau(text).includes(w))) return null;
+      return { type: p.visible ? "product_show" : "product_hide", product_query: q };
     }
     if (call.function.name === "revenue_report") {
       if (["today", "this_week", "this_month"].includes(p.period)) return { type: "revenue_report", report_period: p.period };
@@ -688,6 +995,28 @@ async function guiBanNhap(bot: BotShop, chatId: string, id: string, type: LoaiLe
     const mon = (Array.isArray(payload.items) ? payload.items : []).slice(0, 10)
       .map((it: any) => `• ${html(it.quantity)} × ${html(it.title)}`).join("\n");
     text = `⚠️ <b>Huỷ đơn #${html(payload.display_id)}?</b>\nKhách: ${html(payload.customer_name || "Khách lẻ")}${payload.customer_phone_masked ? ` · ${html(payload.customer_phone_masked)}` : ""}\n${mon ? `${mon}\n` : ""}Tổng: <b>${dinhDangTien(payload.total_vnd)}</b>\n${html(dongTienKhiHuy(payload.payment_status, payload.total_vnd))}\nKhách KHÔNG được báo tự động — anh/chị nhắn khách giúp em.\n\n<b>Thao tác này không hoàn tác được.</b>`;
+  } else if (type === "discount_create") {
+    const muc = payload.percent != null ? `<b>${html(payload.percent)}%</b> trên cả đơn` : `<b>${dinhDangTien(payload.amount)}</b> trên cả đơn`;
+    text = `🎟 <b>Tạo mã giảm giá?</b>\nMã: <code>${html(payload.code)}</code>\nMức giảm: ${muc}\n` +
+      `Hạn dùng: ${payload.ends_at ? `đến <b>${html(payload.ends_label)}</b>` : "<b>KHÔNG có</b> (dùng mãi cho đến khi tắt)"}\n` +
+      `Số lần dùng: ${payload.usage_limit != null ? `tối đa <b>${html(payload.usage_limit)}</b> lần` : "<b>KHÔNG giới hạn</b> — ai có mã cũng dùng được, dùng nhiều lần"}\n\n` +
+      "Mã tạo xong muốn tắt phải vào trang quản trị. Bấm Xác nhận để tạo.";
+  } else if (type === "price_update") {
+    const cu = Number(payload.old_price_vnd) > 0 ? Number(payload.old_price_vnd) : null;
+    const moi = Number(payload.new_price_vnd);
+    let chenh = "";
+    let canhBao = "";
+    if (cu) {
+      const pct = ((moi - cu) / cu) * 100;
+      chenh = ` (${pct >= 0 ? "+" : ""}${(Math.round(pct * 10) / 10).toString().replace(".", ",")}%)`;
+      if (moi < cu * 0.5 || moi > cu * 3) canhBao = "\n⚠️ Giá thay đổi rất lớn, anh/chị kiểm tra lại số.";
+    }
+    if (moi < 10_000) canhBao += `\n⚠️ Giá rất thấp (${dinhDangTien(moi)}), anh/chị kiểm tra lại số.`;
+    text = `💲 <b>Đổi giá?</b>\n<b>${html(payload.title)}</b>${payload.sku ? ` (<code>${html(payload.sku)}</code>)` : ""}\nGiá: ${cu ? dinhDangTien(cu) : "chưa có giá"} → <b>${dinhDangTien(moi)}</b>${chenh}${canhBao}\n\nGiá mới áp dụng ngay cho khách. Bấm Xác nhận để đổi.`;
+  } else if (type === "product_hide" || type === "product_show") {
+    text = type === "product_hide"
+      ? `🙈 <b>Ẩn sản phẩm khỏi cửa hàng?</b>\n<b>${html(payload.title)}</b>${payload.sku ? ` (<code>${html(payload.sku)}</code>)` : ""}\nKhách sẽ không thấy và không mua được. Muốn bán lại thì gõ “/ops mở bán lại ${html(payload.title)}”.`
+      : `👁 <b>Mở bán lại sản phẩm?</b>\n<b>${html(payload.title)}</b>${payload.sku ? ` (<code>${html(payload.sku)}</code>)` : ""}\nSản phẩm sẽ hiện lại trên cửa hàng cho khách mua.`;
   } else if (type === "inventory_lookup") {
     text = `🔎 Tra tồn kho <b>${html(payload.title)}</b> — SKU <code>${html(payload.sku)}</code>?`;
   } else {
@@ -700,6 +1029,201 @@ async function guiBanNhap(bot: BotShop, chatId: string, id: string, type: LoaiLe
     markup.inline_keyboard.push([{ text: "💰 Đã nhận tiền", callback_data: `ops_pay_${payload.display_id}` }]);
   }
   await guiTinQuaBot(bot, { chat_id: chatId, text, parse_mode: "HTML", reply_markup: markup });
+}
+
+const BANG_MA = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // bỏ 0/O, 1/I
+
+/** Mã dễ đọc, không ký tự dễ nhầm: GIAM10-7KQ4, GIAM50K-X3PM. */
+/** Luật mã của backend: trim, CHỮ HOA, chỉ [A-Z0-9_-], 3..32 ký tự. Sai thì trả null. */
+export function chuanHoaMa(v: string): string | null {
+  const m = String(v ?? "").trim().toUpperCase();
+  return /^[A-Z0-9_-]{3,32}$/.test(m) ? m : null;
+}
+
+export function sinhMaGiamGia(percent?: number, amount?: number): string {
+  let hau = "";
+  for (let i = 0; i < 4; i++) hau += BANG_MA[randomInt(BANG_MA.length)];
+  const dau = percent != null ? `GIAM${percent}` : `GIAM${Math.round(Number(amount) / 1000)}K`;
+  return `${dau}-${hau}`;
+}
+
+async function lapBanNhapMaGiam(bot: BotShop, tenantId: string, chatId: string, operatorId: string,
+  messageId: string | null, lenh: LenhVanHanh, originalText: string): Promise<void> {
+  if (lenh.loi_hieu) throw new LoiThanThien(lenh.loi_hieu);
+  const g = GIOI_HAN_MA_GIAM;
+  const gioiHan = `Em chỉ tạo được mã giảm tối đa ${g.toi_da_phan_tram}% hoặc ${dinhDangTien(g.toi_da_so_tien)}. Mã lớn hơn anh/chị báo quản lý nhé.`;
+  // "giảm 10" không đơn vị: hỏi lại bằng 2 nút, chỉ hiện mức nằm trong giới hạn.
+  if (lenh.so_tran != null) {
+    const n = lenh.so_tran;
+    const dong: Array<Array<{ text: string; callback_data: string }>> = [];
+    if (n >= 1 && n <= g.toi_da_phan_tram) dong.push([{ text: `🎟 Giảm ${n}%`, callback_data: `ops_dsc_p${n}` }]);
+    if (n * 1000 >= g.toi_thieu_so_tien && n * 1000 <= g.toi_da_so_tien) dong.push([{ text: `🎟 Giảm ${dinhDangTien(n * 1000)}`, callback_data: `ops_dsc_a${n * 1000}` }]);
+    if (!dong.length) throw new LoiThanThien(`Mức giảm “${n}” không hợp lệ. ${gioiHan}`);
+    if (lenh.discount_code || lenh.han_ngay || lenh.han_so_ngay || lenh.usage_limit != null) {
+      throw new LoiThanThien(`“${n}” là ${n}% hay ${dinhDangTien(n * 1000)}? Anh/chị gõ lại kèm đơn vị, ví dụ: tạo mã giảm ${n}% hoặc tạo mã giảm ${n}k.`);
+    }
+    await guiTinQuaBot(bot, { chat_id: chatId, text: `“${n}” là ${n}% hay ${dinhDangTien(n * 1000)}?`, reply_markup: { inline_keyboard: dong } });
+    return;
+  }
+  const pc = lenh.discount_percent;
+  const am = lenh.discount_amount;
+  if ((pc == null) === (am == null)) throw new LoiThanThien("Anh/chị cho em xin đúng một mức giảm, ví dụ: tạo mã giảm 10% hoặc tạo mã giảm 50k.");
+  if (pc != null) {
+    if (!Number.isFinite(pc) || pc <= 0) throw new LoiThanThien("Mức giảm phải lớn hơn 0%.");
+    if (!Number.isInteger(pc)) throw new LoiThanThien("Em chỉ tạo mã giảm theo số % nguyên, ví dụ 10%.");
+    if (pc > g.toi_da_phan_tram) throw new LoiThanThien(`Mức giảm ${pc}% vượt giới hạn. ${gioiHan}`);
+  } else {
+    if (!Number.isSafeInteger(am) || (am as number) < g.toi_thieu_so_tien) throw new LoiThanThien(`Số tiền giảm quá nhỏ (tối thiểu ${dinhDangTien(g.toi_thieu_so_tien)}). Nếu ý anh/chị là giảm theo %, hãy gõ kèm dấu %, ví dụ: tạo mã giảm 10%.`);
+    if ((am as number) > g.toi_da_so_tien) throw new LoiThanThien(`Mức giảm ${dinhDangTien(am)} vượt giới hạn. ${gioiHan}`);
+  }
+  if (lenh.usage_limit != null && (!Number.isSafeInteger(lenh.usage_limit) || lenh.usage_limit < 1 || lenh.usage_limit > 100_000)) {
+    throw new LoiThanThien("Số lần dùng phải từ 1 đến 100.000.");
+  }
+  if (lenh.han_so_ngay != null && (lenh.han_so_ngay < 1 || lenh.han_so_ngay > 366)) throw new LoiThanThien("Hạn dùng phải từ 1 ngày đến 1 năm.");
+  const han = lenh.han_ngay || lenh.han_so_ngay != null
+    ? tinhHanDung(lenh.han_ngay ? { ngay: lenh.han_ngay } : { soNgay: lenh.han_so_ngay })
+    : null;
+  let code: string | null;
+  if (lenh.discount_code) {
+    code = chuanHoaMa(lenh.discount_code);
+    if (!code) throw new LoiThanThien("Mã chỉ gồm chữ không dấu, số, gạch ngang hoặc gạch dưới, dài 3 đến 32 ký tự. Anh/chị đặt lại mã nhé.");
+  } else code = sinhMaGiamGia(pc, am);
+  const payload = {
+    code, custom_code: Boolean(lenh.discount_code), percent: pc ?? null, amount: am ?? null,
+    ends_at: han?.ends_at ?? null, ends_label: han?.nhan ?? null, usage_limit: lenh.usage_limit ?? null,
+  };
+  const action = await taoAction(tenantId, chatId, messageId, operatorId, "discount_create", "awaiting_confirmation", payload, originalText);
+  if (action.created) await guiBanNhap(bot, chatId, action.id, "discount_create", payload);
+}
+
+/** Từ của câu tìm (bỏ dấu, giữ số) đều có trong tên sản phẩm thì mới được tự chọn. */
+function khopUngVien(query: string, title: string, sku?: string): boolean {
+  return khopDayDu(query, title) || Boolean(sku && boDau(sku).trim() === boDau(query).trim());
+}
+
+function khopDayDu(query: string, title: string): boolean {
+  const tu = boDau(query).replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(Boolean);
+  const t = boDau(title);
+  return tu.length > 0 && tu.every((w) => t.includes(w));
+}
+
+interface UngVien { id: string; sku?: string; title: string; variant_id?: string; price_vnd?: number }
+
+/** Gửi danh sách chọn (ops_pick) khi không chắc đúng sản phẩm. */
+async function guiDanhSachChon(bot: BotShop, tenantId: string, chatId: string, operatorId: string, messageId: string | null,
+  loai: LoaiLenh, payload: Record<string, unknown>, ungVien: UngVien[], query: string, originalText: string, tieuDe?: string): Promise<void> {
+  const action = await taoAction(tenantId, chatId, messageId, operatorId, loai, "awaiting_selection", { ...payload, candidates: ungVien }, originalText);
+  if (!action.created) return;
+  await guiTinQuaBot(bot, {
+    chat_id: chatId,
+    text: `${tieuDe ?? `🔎 Tìm thấy ${ungVien.length} sản phẩm gần giống “${html(query)}”. Chọn đúng sản phẩm:`}\nKhông thấy đúng? Anh/chị gõ rõ tên hơn nhé.`,
+    parse_mode: "HTML",
+    reply_markup: { inline_keyboard: ungVien.map((c, i) => [{ text: `${c.title}${c.sku ? ` (${c.sku})` : ""}${c.price_vnd ? ` · ${dinhDangTien(c.price_vnd)}` : ""}`.slice(0, 60), callback_data: `ops_pick_${action.id}_${i}` }]) },
+  });
+}
+
+interface DongLookup { product_id: string; variant_id: string; sku?: string; title: string; variant_title?: string; price_vnd?: number }
+
+async function traLookup(cfg: MedusaConfig, body: Record<string, unknown>): Promise<DongLookup[]> {
+  try {
+    const r = await goiBackend(cfg, "/ai/products-lookup", body);
+    return Array.isArray(r?.items) ? r.items : [];
+  } catch (e) {
+    console.error("[telegram-operator] products-lookup lỗi:", e);
+    throw new LoiThanThien("Em chưa tra được thông tin sản phẩm lúc này. Anh/chị thử lại sau ít phút giúp em nhé.");
+  }
+}
+
+/** Ẩn / mở bán lại: tìm sản phẩm; chỉ tự chọn khi MỌI từ câu tìm có trong tên, còn lại luôn hiện danh sách. */
+async function lapActionAnHien(bot: BotShop, tenantId: string, chatId: string, operatorId: string,
+  messageId: string | null, lenh: LenhVanHanh, originalText: string): Promise<void> {
+  const query = String(lenh.product_query || "").replace(/^(?:s[ảa]n ph[ẩa]m|sp)\s+/i, "").trim();
+  if (!query) throw new LoiThanThien("Anh/chị cho em xin tên sản phẩm nhé, ví dụ: ẩn sản phẩm Penfolds Bin 389.");
+  let candidates: UngVien[];
+  if (lenh.type === "product_hide") {
+    const kq = await timSanPham(tenantId, { query, in_stock_only: false, limit: 5 });
+    candidates = kq.products.filter((p) => p.id).map((p) => ({ id: p.id, sku: p.sku, title: p.title }));
+    if (!candidates.length) throw new LoiThanThien(`Không tìm thấy sản phẩm đang bán khớp “${query}”. Anh/chị gõ rõ tên hơn giúp em nhé.`);
+  } else {
+    // Sản phẩm đang ẩn không còn trong tìm kiếm: lấy ứng viên từ lịch sử ẩn qua bot (mới nhất trước) và/hoặc SKU gõ trực tiếp,
+    // rồi hỏi backend (status=draft) để xác nhận chúng còn đang ẩn và lấy tên/SKU hiện tại.
+    const cfg = await layMedusa(tenantId);
+    const lichSu = await runInTenantContext(tenantId, async (client) => {
+      const r = await client.query(
+        `SELECT h.payload->>'product_id' AS id, h.payload->>'title' AS title, h.payload->>'sku' AS sku
+           FROM telegram_operator_action h
+          WHERE h.tenant_id=$1 AND h.action_type='product_hide' AND h.status='completed' AND h.payload->>'product_id' IS NOT NULL
+            AND NOT EXISTS (SELECT 1 FROM telegram_operator_action s
+                             WHERE s.tenant_id=h.tenant_id AND s.action_type='product_show' AND s.status='completed'
+                               AND s.payload->>'product_id'=h.payload->>'product_id' AND s.created_at > h.created_at)
+          ORDER BY h.created_at DESC LIMIT 200`,
+        [tenantId]
+      );
+      return r.rows as Array<{ id: string; title: string; sku: string | null }>;
+    });
+    const daCo = new Set<string>();
+    candidates = [];
+    for (const r of lichSu) {
+      if (!r.id || daCo.has(r.id) || !khopDayDu(query, r.title || "")) continue;
+      daCo.add(r.id);
+      candidates.push({ id: r.id, sku: r.sku ?? undefined, title: r.title });
+      if (candidates.length >= 5) break;
+    }
+    const laSku = /^[A-Za-z0-9][A-Za-z0-9_-]{2,40}$/.test(query);
+    if (candidates.length || laSku) {
+      const dong = await traLookup(cfg, { ...(candidates.length ? { ids: candidates.map((c) => c.id) } : { skus: [query] }), status: "draft" });
+      const theoSp = new Map<string, DongLookup>();
+      for (const d of dong) if (!theoSp.has(d.product_id)) theoSp.set(d.product_id, d);
+      candidates = Array.from(theoSp.values()).slice(0, 5).map((d) => ({ id: d.product_id, sku: d.sku, title: d.title }));
+    }
+    if (!candidates.length) throw new LoiThanThien(`Em không thấy sản phẩm đang ẩn nào khớp “${query}”. Em tra được các sản phẩm đã ẩn qua bot hoặc theo mã SKU (ví dụ: mở bán lại sản phẩm PF389).`);
+  }
+  const payload = { product_query: query };
+  if (candidates.length === 1 && khopUngVien(query, candidates[0].title, candidates[0].sku)) {
+    const c = candidates[0];
+    const full = { ...payload, candidates, product_id: c.id, sku: c.sku, title: c.title };
+    const action = await taoAction(tenantId, chatId, messageId, operatorId, lenh.type, "awaiting_confirmation", full, originalText);
+    if (action.created) await guiBanNhap(bot, chatId, action.id, lenh.type, full);
+    return;
+  }
+  await guiDanhSachChon(bot, tenantId, chatId, operatorId, messageId, lenh.type, payload, candidates, query, originalText);
+}
+
+/** Đổi giá: tìm sản phẩm, lấy giá hiện tại từ products-lookup, cho chọn biến thể nếu không chắc. */
+async function lapActionDoiGia(bot: BotShop, tenantId: string, chatId: string, operatorId: string,
+  messageId: string | null, lenh: LenhVanHanh, originalText: string): Promise<void> {
+  const query = String(lenh.product_query || "").replace(/^(?:s[ảa]n ph[ẩa]m|sp)\s+/i, "").trim();
+  const gia = Number(lenh.price_vnd);
+  if (!query || !Number.isSafeInteger(gia) || gia < 1000 || gia > 1_000_000_000) {
+    throw new LoiThanThien("Anh/chị cho em xin tên sản phẩm và giá mới (từ 1.000đ), ví dụ: đổi giá Penfolds Bin 389 thành 1.250.000.");
+  }
+  const cfg = await layMedusa(tenantId);
+  const kq = await timSanPham(tenantId, { query, in_stock_only: false, limit: 5 });
+  const sp = kq.products.filter((p) => p.id);
+  if (!sp.length) throw new LoiThanThien(`Không tìm thấy sản phẩm đang bán khớp “${query}”. Anh/chị gõ rõ tên hơn giúp em nhé.`);
+  const dongTho = await traLookup(cfg, { ids: sp.map((p) => p.id) });
+  // Backend có thể trả nhiều dòng cho một biến thể (nhiều loại giá): gộp theo variant_id, giữ dòng đầu.
+  const daThay = new Set<string>();
+  const dong = dongTho.filter((d) => {
+    const k = String(d.variant_id || `${d.product_id}:${d.sku ?? ""}`);
+    if (daThay.has(k)) return false;
+    daThay.add(k);
+    return true;
+  });
+  if (!dong.length) throw new LoiThanThien("Em chưa lấy được giá hiện tại của sản phẩm này (có thể sản phẩm đang ẩn). Anh/chị kiểm tra trong trang quản trị giúp em nhé.");
+  const nhan = (d: DongLookup) => `${d.title}${d.variant_title && d.variant_title !== d.title && !/^default/i.test(d.variant_title) ? ` — ${d.variant_title}` : ""}`;
+  const ungVien: UngVien[] = dong.slice(0, 8).map((d) => ({ id: d.product_id, variant_id: d.variant_id, sku: d.sku, title: nhan(d), price_vnd: Number(d.price_vnd) || 0 }));
+  const payload = { product_query: query, new_price_vnd: gia };
+  if (sp.length === 1 && khopUngVien(query, sp[0].title, sp[0].sku) && dong.length === 1) {
+    const d = dong[0];
+    const full = { ...payload, product_id: d.product_id, variant_id: d.variant_id, sku: d.sku, title: nhan(d), old_price_vnd: Number(d.price_vnd) || null };
+    const action = await taoAction(tenantId, chatId, messageId, operatorId, "price_update", "awaiting_confirmation", full, originalText);
+    if (action.created) await guiBanNhap(bot, chatId, action.id, "price_update", full);
+    return;
+  }
+  await guiDanhSachChon(bot, tenantId, chatId, operatorId, messageId, "price_update", payload, ungVien, query, originalText,
+    (dong.length > 1 && sp.length === 1 ? `🔎 Sản phẩm có ${dong.length} lựa chọn. Chọn đúng loại cần đổi giá:` : `🔎 Tìm thấy ${ungVien.length} lựa chọn gần giống “${html(query)}”. Chọn đúng loại cần đổi giá:`) +
+      (dong.length > 8 ? `\nCòn ${dong.length - 8} lựa chọn nữa chưa hiện, anh/chị gõ rõ tên biến thể hơn nhé.` : ""));
 }
 
 async function lapActionSanPham(bot: BotShop, tenantId: string, chatId: string, operatorId: string,
@@ -1000,6 +1524,9 @@ export async function xuLyYeuCauVanHanh(bot: BotShop, tenantId: string, message:
       "• <code>duyệt đơn 12</code>: duyệt đơn số 12\n" +
       "• <code>đã nhận tiền đơn 12</code>: ghi nhận khách đã chuyển khoản\n" +
       "• <code>huỷ đơn 12</code>: huỷ cả đơn chưa duyệt (nếu khách đã chuyển tiền thì phải tự chuyển trả)\n" +
+      "• <code>tạo mã giảm 10%</code>, <code>tạo mã TET10 giảm 50k hết hạn 31/12 dùng 50 lần</code>: tạo mã giảm giá (tối đa 30% hoặc 500.000đ)\n" +
+      "• <code>ẩn sản phẩm X</code>, <code>mở bán lại sản phẩm X</code>: ẩn / bán lại sản phẩm\n" +
+      "• <code>đổi giá Penfolds Bin 389 thành 1.250.000</code>: đổi giá bán\n" +
       "• <code>doanh thu hôm nay</code>, <code>doanh thu 7 ngày</code>: xem doanh thu\n" +
       "• <code>xem đơn 12</code>, <code>tra đơn chị Lan</code>, <code>đơn của 0912345678</code>: xem thông tin đơn\n" +
       "• Gửi ảnh nhãn chai kèm chú thích <code>/ops mới nhập thêm 30 chai</code>\n\n" +
@@ -1031,6 +1558,18 @@ export async function xuLyYeuCauVanHanh(bot: BotShop, tenantId: string, message:
     const n = Number(lenh.order_number);
     if (!Number.isSafeInteger(n) || n <= 0) throw new LoiThanThien("Anh/chị cho em xin số đơn nhé, ví dụ: huỷ đơn 12.");
     await lapBanNhapHuyDon(bot, tenantId, chatId, operatorId, messageId, n, text);
+    return;
+  }
+  if (lenh.type === "discount_create") {
+    await lapBanNhapMaGiam(bot, tenantId, chatId, operatorId, messageId, lenh, text);
+    return;
+  }
+  if (lenh.type === "product_hide" || lenh.type === "product_show") {
+    await lapActionAnHien(bot, tenantId, chatId, operatorId, messageId, lenh, text);
+    return;
+  }
+  if (lenh.type === "product_price") {
+    await lapActionDoiGia(bot, tenantId, chatId, operatorId, messageId, lenh, text);
     return;
   }
   if (lenh.type === "revenue_report") {
@@ -1169,6 +1708,88 @@ async function huyDonBackend(cfg: MedusaConfig, p: any): Promise<any> {
   throw new LoiThanThien(`Chưa huỷ được đơn #${so}. Có thể đơn đã được duyệt hoặc hệ thống đang lỗi. Anh/chị ${lai}, hoặc báo quản lý nếu đơn đã duyệt.`);
 }
 
+/**
+ * POST /ai/create-discount {code, percent | amount, currency, ends_at?, usage_limit?}.
+ * Lỗi map theo `code` của backend (invalid_value, duplicate_code, unauthorized, internal_error);
+ * backend cũ không có code thì fallback theo HTTP status.
+ */
+async function taoMaGiamBackend(cfg: MedusaConfig, p: any): Promise<any> {
+  let res: Response;
+  const body: Record<string, unknown> = p.percent != null ? { code: p.code, percent: Number(p.percent) } : { code: p.code, amount: Number(p.amount), currency: "vnd" };
+  if (p.ends_at) body.ends_at = p.ends_at;
+  if (p.usage_limit != null) body.usage_limit = Number(p.usage_limit);
+  try {
+    res = await fetchCoTimeout(new URL("/ai/create-discount", cfg.baseUrl).toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-ai-secret-key": env.AI_SECRET_KEY },
+      body: JSON.stringify(body),
+    }, 60_000);
+  } catch (e) {
+    console.error("[telegram-operator] create-discount lỗi mạng:", e);
+    throw new LoiThanThien(`Chưa rõ mã ${p.code} đã tạo chưa. Anh/chị kiểm tra trong trang quản trị trước khi tạo lại, kẻo bị trùng mã.`);
+  }
+  const resp: any = await res.json().catch(() => ({}));
+  if (res.ok) return resp;
+  const code = String(resp?.code || "");
+  console.error(`[telegram-operator] create-discount ${res.status} code=${code}`);
+  if (res.status === 401 || code === "unauthorized") throw new LoiThanThien("Bot chưa kết nối được hệ thống bán hàng, anh/chị báo người quản trị giúp em.");
+  if (code === "duplicate_code") {
+    throw new LoiThanThien(p.custom_code ? `Mã ${p.code} đã có, anh/chị đặt tên khác.` : `Mã ${p.code} bị trùng với mã đã có. Anh/chị gõ lại lệnh để em sinh mã khác.`);
+  }
+  if (code === "invalid_value") throw new LoiThanThien("Thông tin mã chưa hợp lệ (mức giảm, hạn hoặc số lượt). Anh/chị kiểm tra lại câu lệnh nhé.");
+  if (code === "internal_error") throw new LoiThanThien(`Chưa tạo được mã ${p.code} vì hệ thống đang lỗi. Anh/chị thử lại sau ít phút nhé.`);
+  if (res.status === 400) throw new LoiThanThien("Chưa tạo được mã vì thông tin chưa hợp lệ. Anh/chị kiểm tra lại câu lệnh nhé.");
+  throw new LoiThanThien(`Chưa tạo được mã ${p.code}. Có thể mã bị trùng với mã đã có, anh/chị thử lại để em sinh mã khác, hoặc kiểm tra trong trang quản trị.`);
+}
+
+/** POST /ai/update-price {variant_id, amount_vnd}. Lỗi map theo `code`. */
+async function doiGiaBackend(cfg: MedusaConfig, p: any): Promise<any> {
+  let res: Response;
+  try {
+    res = await fetchCoTimeout(new URL("/ai/update-price", cfg.baseUrl).toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-ai-secret-key": env.AI_SECRET_KEY },
+      body: JSON.stringify({ variant_id: p.variant_id, amount_vnd: Number(p.new_price_vnd) }),
+    }, 60_000);
+  } catch (e) {
+    console.error("[telegram-operator] update-price lỗi mạng:", e);
+    throw new LoiThanThien(`Chưa rõ giá “${p.title}” đã đổi chưa. Anh/chị kiểm tra trong trang quản trị trước khi đổi lại nhé.`);
+  }
+  const resp: any = await res.json().catch(() => ({}));
+  if (res.ok) return resp;
+  const code = String(resp?.code || "");
+  console.error(`[telegram-operator] update-price ${res.status} code=${code}`);
+  if (res.status === 401 || code === "unauthorized") throw new LoiThanThien("Bot chưa kết nối được hệ thống bán hàng, anh/chị báo người quản trị giúp em.");
+  switch (code) {
+    case "invalid_price": throw new LoiThanThien("Giá mới không hợp lệ. Anh/chị kiểm tra lại số tiền nhé.");
+    case "variant_not_found":
+    case "product_not_found": throw new LoiThanThien(`Không tìm thấy “${p.title}” (có thể đã bị xoá). Anh/chị kiểm tra trong trang quản trị giúp em.`);
+    case "ambiguous_variant": throw new LoiThanThien(`“${p.title}” có nhiều loại, em chưa chọn được đúng loại. Anh/chị gõ lại lệnh và chọn loại cần đổi giá nhé.`);
+    case "invalid_target": throw new LoiThanThien("Em chưa xác định được sản phẩm cần đổi giá. Anh/chị gõ lại lệnh nhé.");
+    default: throw new LoiThanThien(`Chưa đổi được giá “${p.title}”. Anh/chị thử lại sau ít phút hoặc đổi trong trang quản trị giúp em nhé.`);
+  }
+}
+
+/** POST /ai/update-product {id, update:{status}}. Lỗi map theo HTTP status. */
+async function doiTrangThaiSanPhamBackend(cfg: MedusaConfig, p: any, status: "draft" | "published"): Promise<any> {
+  let res: Response;
+  try {
+    res = await fetchCoTimeout(new URL("/ai/update-product", cfg.baseUrl).toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-ai-secret-key": env.AI_SECRET_KEY },
+      body: JSON.stringify({ id: p.product_id, update: { status } }),
+    }, 60_000);
+  } catch (e) {
+    console.error("[telegram-operator] update-product lỗi mạng:", e);
+    throw new LoiThanThien(`Chưa rõ “${p.title}” đã ${status === "draft" ? "ẩn" : "mở bán lại"} chưa. Anh/chị kiểm tra trong trang quản trị nhé.`);
+  }
+  const resp: any = await res.json().catch(() => ({}));
+  if (res.ok) return resp;
+  console.error(`[telegram-operator] update-product ${res.status}`);
+  if (res.status === 401) throw new LoiThanThien("Bot chưa kết nối được hệ thống bán hàng, anh/chị báo người quản trị giúp em.");
+  throw new LoiThanThien(`Chưa ${status === "draft" ? "ẩn" : "mở bán lại"} được “${p.title}”. Anh/chị thử lại sau ít phút hoặc làm trong trang quản trị giúp em nhé.`);
+}
+
 /** Gọi /ai/order-complete và đổi mọi lỗi thành lời nhắn dễ hiểu. */
 async function duyetDonBackend(cfg: MedusaConfig, p: any): Promise<any> {
   const so = p.display_id;
@@ -1188,6 +1809,9 @@ async function duyetDonBackend(cfg: MedusaConfig, p: any): Promise<any> {
   const loi = String(body?.error || "");
   console.error(`[telegram-operator] order-complete ${res.status}: ${loi.slice(0, 300)}`);
   if (res.status === 401) throw new LoiThanThien("Bot chưa kết nối được hệ thống bán hàng, anh/chị báo người quản trị giúp em.");
+  if (res.status === 409 && body?.code === "order_canceled") {
+    throw new LoiThanThien(`Đơn #${so} đã bị huỷ nên không duyệt được.`);
+  }
   if (res.status === 409) {
     throw new LoiThanThien(`Đơn #${so} đang được xử lý. Anh/chị đợi vài giây rồi gõ lại “duyệt đơn ${so}” nhé.`);
   }
@@ -1215,9 +1839,50 @@ async function thucThi(tenantId: string, action: any): Promise<any> {
   if (action.action_type === "order_complete") return duyetDonBackend(cfg, p);
   if (action.action_type === "order_payment_received") return ghiNhanTienBackend(cfg, p);
   if (action.action_type === "order_cancel") return huyDonBackend(cfg, p);
+  if (action.action_type === "discount_create") return taoMaGiamBackend(cfg, p);
+  if (action.action_type === "price_update") return doiGiaBackend(cfg, p);
+  if (action.action_type === "product_hide") return doiTrangThaiSanPhamBackend(cfg, p, "draft");
+  if (action.action_type === "product_show") return doiTrangThaiSanPhamBackend(cfg, p, "published");
+  if (action.action_type !== "create_product") throw new Error(`Loại thao tác không hỗ trợ: ${String(action.action_type)}`);
   return goiBackend(cfg, "/ai/create-product", {
     product: { title: p.title, description: p.description, sku: p.sku, price_vnd: p.price_vnd },
     initial_quantity: Number(p.initial_quantity || 0),
+  });
+}
+
+/** Lưu câu nhân viên gõ khi đang tiếp quản mà bị chặn (giống lệnh), kèm ĐÚNG hội thoại lúc bị chặn, để nút "Vẫn gửi cho khách" không gửi nhầm khách khác. */
+export async function luuCauChoGui(tenantId: string, chatId: string, operatorId: string, text: string,
+  conversationId: string, messageId: string | null = null): Promise<string> {
+  const a = await taoAction(tenantId, chatId, messageId, operatorId, "forward_to_customer", "awaiting_confirmation",
+    { text: text.slice(0, 4000), conversation_id: conversationId }, text);
+  return a.id;
+}
+
+/** Lấy (và đánh dấu đã dùng) câu đã lưu: chỉ đúng người gõ, đúng chat, còn hạn, dùng một lần. Trả cả hội thoại đã lưu. */
+export async function layCauChoGui(tenantId: string, id: string, chatId: string, operatorId: string): Promise<{ text: string; conversationId: string } | null> {
+  return runInTenantContext(tenantId, async (client) => {
+    const r = await client.query(
+      `UPDATE telegram_operator_action SET status='completed', confirmed_by=$1
+        WHERE id=$2 AND tenant_id=$3 AND telegram_chat_id=$4 AND action_type='forward_to_customer'
+          AND status='awaiting_confirmation' AND expires_at > now() AND requested_by=$1
+        RETURNING payload->>'text' AS text, payload->>'conversation_id' AS conversation_id`,
+      [operatorId, id, tenantId, chatId]
+    );
+    const row = r.rows[0];
+    return row?.text && row?.conversation_id ? { text: String(row.text), conversationId: String(row.conversation_id) } : null;
+  });
+}
+
+/** Hội thoại đã lưu có còn đúng là của nhân viên này, còn mở và đang do người trả lời không. */
+export async function hoiThoaiConTiepQuan(tenantId: string, operatorId: string, conversationId: string): Promise<boolean> {
+  return runInTenantContext(tenantId, async (client) => {
+    const r = await client.query(
+      `SELECT 1 FROM conversation
+        WHERE id = $1 AND tenant_id = $2 AND assigned_to = $3
+          AND mode IN ('NGUOI', 'CHO_NGUOI') AND dong_luc IS NULL`,
+      [conversationId, tenantId, operatorId]
+    );
+    return r.rows.length > 0;
   });
 }
 
@@ -1260,6 +1925,20 @@ export async function xuLyCallbackVanHanh(bot: BotShop, tenantId: string, callba
     } catch (e: any) {
       if (!(e instanceof LoiThanThien)) console.error("[telegram-operator] mở đơn để huỷ lỗi:", e);
       await guiTinQuaBot(bot, { chat_id: chat, text: `⚠️ ${html(e instanceof LoiThanThien ? e.message : "Em chưa mở được đơn này. Anh/chị thử lại sau ít phút giúp em nhé.")}`, parse_mode: "HTML" });
+    }
+    return true;
+  }
+  const khopMa = String(callback.data || "").match(CALLBACK_MA_RE);
+  if (khopMa) {
+    const chat = String(callback.message?.chat?.id || "");
+    await answerCallbackQuery(bot, callback.id, "Đang lập bản nháp…");
+    try {
+      const v = Number(khopMa[2]);
+      await lapBanNhapMaGiam(bot, tenantId, chat, String(callback.from?.id || ""), `cb:${callback.id}`,
+        { type: "discount_create", ...(khopMa[1] === "p" ? { discount_percent: v } : { discount_amount: v }) }, callback.data || "");
+    } catch (e: any) {
+      if (!(e instanceof LoiThanThien)) console.error("[telegram-operator] nút mã giảm giá lỗi:", e);
+      await guiTinQuaBot(bot, { chat_id: chat, text: `⚠️ ${html(e instanceof LoiThanThien ? e.message : "Em chưa làm được việc này. Anh/chị thử lại sau ít phút giúp em nhé.")}`, parse_mode: "HTML" });
     }
     return true;
   }
@@ -1314,13 +1993,15 @@ export async function xuLyCallbackVanHanh(bot: BotShop, tenantId: string, callba
     const selected = await runInTenantContext(tenantId, async (client) => {
       const r = await client.query(
         `SELECT action_type, payload FROM telegram_operator_action
-         WHERE id=$1 AND tenant_id=$2 AND telegram_chat_id=$3 AND status='awaiting_selection' AND expires_at > now()`,
-        [id, tenantId, chatId]
+         WHERE id=$1 AND tenant_id=$2 AND telegram_chat_id=$3 AND status='awaiting_selection' AND expires_at > now()
+           AND (action_type NOT IN ('order_cancel', 'discount_create', 'price_update') OR requested_by=$4)`,
+        [id, tenantId, chatId, operatorId]
       );
       const row = r.rows[0];
       const p = row?.payload?.candidates?.[idx];
-      if (!row || !p?.sku) return null;
-      const payload = { ...row.payload, sku: p.sku, title: p.title };
+      if (!row || !(p?.sku || p?.id)) return null;
+      const payload = { ...row.payload, sku: p.sku, title: p.title, product_id: p.id,
+        ...(p.variant_id ? { variant_id: p.variant_id, old_price_vnd: Number(p.price_vnd) > 0 ? Number(p.price_vnd) : null } : {}) };
       await client.query(
         `UPDATE telegram_operator_action SET status='awaiting_confirmation', payload=$1::jsonb
          WHERE id=$2 AND tenant_id=$3 AND status='awaiting_selection'`,
@@ -1344,7 +2025,8 @@ export async function xuLyCallbackVanHanh(bot: BotShop, tenantId: string, callba
           SET status='executing', confirmed_by=$1
         WHERE id=$2 AND tenant_id=$3 AND telegram_chat_id=$4
           AND status='awaiting_confirmation' AND expires_at > now()
-          AND (action_type <> 'order_cancel' OR requested_by = $1)
+          AND action_type <> 'forward_to_customer'
+          AND (action_type NOT IN ('order_cancel', 'discount_create', 'price_update') OR requested_by = $1)
         RETURNING *`,
       [operatorId, id, tenantId, chatId]
     );
@@ -1354,15 +2036,15 @@ export async function xuLyCallbackVanHanh(bot: BotShop, tenantId: string, callba
     // Lệnh huỷ đơn chỉ người tạo mới xác nhận được: báo rõ nếu bị chặn vì lý do này.
     const cuaNguoiKhac = await runInTenantContext(tenantId, async (client) => {
       const r = await client.query(
-        `SELECT 1 FROM telegram_operator_action
-          WHERE id=$1 AND tenant_id=$2 AND telegram_chat_id=$3 AND action_type='order_cancel'
+        `SELECT action_type FROM telegram_operator_action
+          WHERE id=$1 AND tenant_id=$2 AND telegram_chat_id=$3 AND action_type IN ('order_cancel', 'discount_create', 'price_update')
             AND status='awaiting_confirmation' AND expires_at > now() AND requested_by <> $4`,
         [id, tenantId, chatId, operatorId]
       );
-      return r.rows.length > 0;
+      return r.rows[0] ? (r.rows[0].action_type ?? "order_cancel") as string : null;
     });
     if (cuaNguoiKhac) {
-      await answerCallbackQuery(bot, callback.id, "Chỉ người tạo lệnh huỷ mới xác nhận được.", true);
+      await answerCallbackQuery(bot, callback.id, cuaNguoiKhac === "order_cancel" ? "Chỉ người tạo lệnh huỷ mới xác nhận được." : "Chỉ người tạo lệnh này mới xác nhận được.", true);
       return true;
     }
     await answerCallbackQuery(bot, callback.id, "Thao tác đã chạy, bị huỷ hoặc hết hạn.", true);
@@ -1404,6 +2086,18 @@ export async function xuLyCallbackVanHanh(bot: BotShop, tenantId: string, callba
           : "\nKhách không được báo tự động — anh/chị nhắn khách giúp em.");
       }
     }
+    if (action.action_type === "discount_create") {
+      const maTao = chuanHoaMa(String(result?.promotion?.code ?? "")) ?? p.code;
+      text = `✅ Đã tạo mã <code>${html(maTao)}</code> — giảm ${p.percent != null ? `${html(p.percent)}%` : dinhDangTien(p.amount)}. Gửi mã này cho khách là dùng được.\n` +
+        `Hạn dùng: ${p.ends_at ? `đến ${html(p.ends_label)}` : "không có"}. Số lần dùng: ${p.usage_limit != null ? `tối đa ${html(p.usage_limit)} lần` : "không giới hạn"}.`;
+    }
+    if (action.action_type === "price_update") {
+      const cu = Number(result?.old_price_vnd) > 0 ? Number(result.old_price_vnd) : (Number(p.old_price_vnd) > 0 ? Number(p.old_price_vnd) : null);
+      const moi = Number(result?.new_price_vnd) > 0 ? Number(result.new_price_vnd) : Number(p.new_price_vnd);
+      text = `✅ Đã đổi giá <b>${html(result?.product_title ? `${result.product_title}${result?.variant_title && result.variant_title !== result.product_title ? ` — ${result.variant_title}` : ""}` : p.title)}</b>: ${cu ? `${dinhDangTien(cu)} → ` : ""}<b>${dinhDangTien(moi)}</b>.`;
+    }
+    if (action.action_type === "product_hide") text = `✅ Đã ẩn <b>${html(p.title)}</b> khỏi cửa hàng.`;
+    if (action.action_type === "product_show") text = `✅ Đã mở bán lại <b>${html(p.title)}</b>.`;
     if (action.action_type === "order_complete") {
       text = result?.da_xu_ly_truoc_do
         ? `ℹ️ Đơn #${html(p.display_id)} đã được duyệt trước đó rồi.`
@@ -1423,7 +2117,10 @@ export async function xuLyCallbackVanHanh(bot: BotShop, tenantId: string, callba
       `UPDATE telegram_operator_action SET status='failed', error=$1 WHERE id=$2 AND tenant_id=$3`,
       [loi, id, tenantId]
     ));
-    const thanThien = action.action_type === "order_complete" || action.action_type === "order_payment_received" || action.action_type === "order_cancel"
+    const thanThienMoi = ["discount_create", "product_hide", "product_show", "price_update"].includes(action.action_type);
+    const thanThien = thanThienMoi
+      ? (e instanceof LoiThanThien ? e.message : "Em chưa làm được việc này. Anh/chị thử lại sau ít phút giúp em nhé.")
+      : action.action_type === "order_complete" || action.action_type === "order_payment_received" || action.action_type === "order_cancel"
       ? (e instanceof LoiThanThien ? e.message : `Chưa ${action.action_type === "order_complete" ? "duyệt được" : action.action_type === "order_cancel" ? "huỷ được" : "ghi nhận được tiền của"} đơn #${action.payload?.display_id ?? ""}. Anh/chị thử lại sau ít phút giúp em nhé.`)
       : `Không thực hiện được: ${loi}`;
     await guiTinQuaBot(bot, { chat_id: chatId, text: `❌ ${html(thanThien)}`, parse_mode: "HTML" });

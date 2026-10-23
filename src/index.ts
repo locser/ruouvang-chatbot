@@ -27,7 +27,7 @@ import { khachMuonChotDon, botHuaGuiQr } from "./services/checkoutIntent";
 import { chayOrchestrator, trangThaiMoi } from "./services/orchestrator";
 import { fetchJson } from "./services/http";
 import { routerCaiDat, routerCongKhai } from "./routes/caiDat";
-import { LoiThanThien, goiYDonHang, trongGiongLenh, laLenhGhiDonHang, laYeuCauVanHanh, laYeuCauVanHanhRoRang, xuLyCallbackVanHanh, xuLyYeuCauVanHanh } from "./services/telegramOperator";
+import { LoiThanThien, goiYDonHang, trongGiongLenh, laLenhGhiDonHang, luuCauChoGui, layCauChoGui, hoiThoaiConTiepQuan, html as escapeHtml, laYeuCauVanHanh, laYeuCauVanHanhRoRang, xuLyCallbackVanHanh, xuLyYeuCauVanHanh } from "./services/telegramOperator";
 import { layCaiDat } from "./services/caiDat";
 import { khoiDongOutboxDispatcher, dungOutboxDispatcher } from "./services/outboxDispatcher";
 
@@ -1237,6 +1237,54 @@ async function laNhanVienCuaShop(tenantId: string, telegramId: string): Promise<
   }
 }
 
+
+/** Hội thoại khách nhân viên này đang tiếp quản (nếu có). */
+async function timHoiThoaiDangTiepQuan(tenantId: string, operatorId: string): Promise<string | null> {
+  return runInTenantContext(tenantId, async (client) => {
+    const r = await client.query(
+      `SELECT id FROM conversation
+        WHERE tenant_id = $2 AND assigned_to = $1
+          AND mode IN ('NGUOI', 'CHO_NGUOI') AND dong_luc IS NULL
+        ORDER BY last_customer_msg_at DESC LIMIT 1`,
+      [operatorId, tenantId]
+    );
+    return r.rows[0]?.id ? String(r.rows[0].id) : null;
+  });
+}
+
+/** Gửi lời nhân viên cho khách đang tiếp quản (kiểm tra tuân thủ F-15, lưu tin, báo lại cho nhân viên). Dùng chung cho gõ thẳng và nút "Vẫn gửi". */
+async function guiLoiNhanVienChoKhach(bot: BotShop, tenantId: string, chatId: string | number, conv: string, text: string): Promise<void> {
+  const claims = assertSafeTranslation("vi-VN", text);
+  const isBlocked = claims.some((c) => c.level === "BLOCK");
+  if (isBlocked || botDangQuyDoi(text, "VND")) {
+    await guiTinQuaBot(bot, {
+      chat_id: chatId,
+      text: `⚠️ *Cảnh báo tuân thủ*: Tin nhắn của bạn vi phạm quy định quảng cáo y tế hoặc giá cả và không được gửi tới khách hàng.`,
+      parse_mode: "Markdown",
+    });
+    return;
+  }
+  await runInTenantContext(tenantId, async (client) => {
+    await client.query(
+      `INSERT INTO message (tenant_id, conversation_id, vai_tro, noi_dung)
+       VALUES ($1, $2, 'nguoi', $3)`,
+      [tenantId, conv, text]
+    );
+    await client.query(
+      `UPDATE conversation
+          SET mode = 'NGUOI', mode_version = mode_version + 1, last_human_msg_at = now()
+        WHERE id = $1`,
+      [conv]
+    );
+  });
+  await guiTinQuaBot(bot, {
+    chat_id: chatId,
+    text: `✅ Đã gửi phản hồi tới khách hàng (<code>${escapeHtml(conv.slice(0, 8))}</code>): "${escapeHtml(text)}"` +
+      (trongGiongLenh(text) ? "\n(Muốn ra lệnh cho bot thì gõ /ops trước câu lệnh.)" : ""),
+    parse_mode: "HTML",
+  });
+}
+
 app.post("/v1/tg/webhook/:tenant_id", async (req: Request, res: Response) => {
   const tenantId = String(req.params.tenant_id || "");
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tenantId)) {
@@ -1278,6 +1326,21 @@ app.post("/v1/tg/webhook/:tenant_id", async (req: Request, res: Response) => {
       if (dataStr.startsWith("ops_")) {
         if (!(await laNhanVienCuaShop(tenantId, operatorId))) {
           await answerCallbackQuery(bot, callback_query.id, "Bạn không có quyền vận hành shop này.", true);
+          return res.json({ ok: true });
+        }
+        const mGui = dataStr.match(/^ops_send_([0-9a-f-]{36})$/i);
+        if (mGui) {
+          const chatCb = callback_query.message?.chat?.id;
+          // Câu đã lưu kèm hội thoại lúc bị chặn: chỉ gửi đúng khách đó, và chỉ khi nhân viên vẫn đang tiếp quản khách đó.
+          const luu = await layCauChoGui(tenantId, mGui[1], String(chatCb ?? ""), operatorId);
+          if (!luu) {
+            await answerCallbackQuery(bot, callback_query.id, "Câu này đã gửi, bị huỷ hoặc hết hạn.", true);
+          } else if (!(await hoiThoaiConTiepQuan(tenantId, operatorId, luu.conversationId))) {
+            await answerCallbackQuery(bot, callback_query.id, "Khách này đã đóng hoặc đã chuyển người khác, em chưa gửi.", true);
+          } else {
+            await answerCallbackQuery(bot, callback_query.id, "Đang gửi cho khách…");
+            await guiLoiNhanVienChoKhach(bot, tenantId, chatCb as any, luu.conversationId, luu.text);
+          }
           return res.json({ ok: true });
         }
         if (await xuLyCallbackVanHanh(bot, tenantId, callback_query)) {
@@ -1384,54 +1447,20 @@ app.post("/v1/tg/webhook/:tenant_id", async (req: Request, res: Response) => {
         });
       } else if (operatorId && (await laNhanVienCuaShop(tenantId, operatorId))) {
         // Hội thoại đang gán cho nhân viên này — CHỈ trong phạm vi shop này.
-        const conv = await runInTenantContext(tenantId, async (client) => {
-          const r = await client.query(
-            `SELECT id FROM conversation
-              WHERE tenant_id = $2 AND assigned_to = $1
-                AND mode IN ('NGUOI', 'CHO_NGUOI') AND dong_luc IS NULL
-              ORDER BY last_customer_msg_at DESC LIMIT 1`,
-            [operatorId, tenantId]
-          );
-          return r.rows[0]?.id ? String(r.rows[0].id) : null;
-        });
+        const conv = await timHoiThoaiDangTiepQuan(tenantId, operatorId);
 
         if (conv && laLenhGhiDonHang(text)) {
-          // Câu khớp lệnh huỷ/duyệt/nhận tiền khi đang chat với khách: tuyệt đối không gửi cho khách.
+          // Câu mở đầu bằng động từ lệnh (huỷ/duyệt đơn, tạo mã, ẩn sản phẩm, đổi giá...) khi đang chat với khách:
+          // không gửi cho khách, nhưng cho nút gửi nếu thật ra là lời nhắn khách.
+          const idGui = await luuCauChoGui(tenantId, String(chatId), operatorId, text, conv, message.message_id != null ? String(message.message_id) : null);
+          const maKhach = conv.slice(0, 8);
           await guiTinQuaBot(bot, {
             chat_id: chatId,
-            text: "Anh/chị đang chat với khách nên em chưa gửi câu này đi. Muốn thao tác đơn thì gõ /ops trước, ví dụ: /ops huỷ đơn 12",
+            text: `Câu này giống một lệnh cho bot nên em chưa gửi cho khách (mã khách ${maKhach}). Nếu là lệnh, gõ /ops trước câu (ví dụ: /ops huỷ đơn 12). Nếu là lời nhắn cho khách ${maKhach}, bấm nút bên dưới.`,
+            reply_markup: { inline_keyboard: [[{ text: `📤 Vẫn gửi cho khách ${maKhach}`, callback_data: `ops_send_${idGui}` }]] } as any,
           });
         } else if (conv) {
-          // Kiểm tra tuân thủ với chính lời nhân viên gõ (F-15)
-          const claims = assertSafeTranslation("vi-VN", text);
-          const isBlocked = claims.some((c) => c.level === "BLOCK");
-          if (isBlocked || botDangQuyDoi(text, "VND")) {
-            await guiTinQuaBot(bot, {
-              chat_id: chatId,
-              text: `⚠️ *Cảnh báo tuân thủ*: Tin nhắn của bạn vi phạm quy định quảng cáo y tế hoặc giá cả và không được gửi tới khách hàng.`,
-              parse_mode: "Markdown",
-            });
-          } else {
-            await runInTenantContext(tenantId, async (client) => {
-              await client.query(
-                `INSERT INTO message (tenant_id, conversation_id, vai_tro, noi_dung)
-                 VALUES ($1, $2, 'nguoi', $3)`,
-                [tenantId, conv, text]
-              );
-              await client.query(
-                `UPDATE conversation
-                    SET mode = 'NGUOI', mode_version = mode_version + 1, last_human_msg_at = now()
-                  WHERE id = $1`,
-                [conv]
-              );
-            });
-            await guiTinQuaBot(bot, {
-              chat_id: chatId,
-              text: `✅ Đã gửi phản hồi tới khách hàng (\`${conv.slice(0, 8)}\`): "${text}"` +
-                (trongGiongLenh(text) ? "\n(Muốn ra lệnh cho bot thì gõ /ops trước câu lệnh.)" : ""),
-              parse_mode: "Markdown",
-            });
-          }
+          await guiLoiNhanVienChoKhach(bot, tenantId, chatId, conv, text);
         } else if (!message.photo?.length) {
           // Không tiếp quản khách nào mà gõ câu về đơn bot chưa hiểu: gợi ý nút, đừng im lặng.
           const goiY = goiYDonHang(text, message.chat?.type === "private");
