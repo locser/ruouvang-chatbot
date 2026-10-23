@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500&family=Be+Vietnam+Pro:wght@400;500;600&display=swap">
-  <link rel="stylesheet" href="widget.css?v=20261014">
+  <link rel="stylesheet" href="widget.css?v=20261023">
 </head>
 <body>
   <div id="chat-widget">
@@ -59,8 +59,29 @@
         </button>
       </form>
     </footer>
+
+    <!-- Modal riêng thay cho confirm() mặc định của trình duyệt. -->
+    <div id="xoa-lich-su-dialog" class="confirm-overlay" hidden>
+      <section class="confirm-dialog" role="dialog" aria-modal="true"
+               aria-labelledby="xoa-dialog-title" aria-describedby="xoa-dialog-desc">
+        <div class="confirm-icon" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
+            <path d="M4 7h16M9 7V4h6v3m-8 0 1 13h8l1-13M10 11v5m4-5v5" />
+          </svg>
+        </div>
+        <p class="confirm-eyebrow">VP HOLDING</p>
+        <h2 id="xoa-dialog-title">Xoá lịch sử trò chuyện?</h2>
+        <p id="xoa-dialog-desc" class="confirm-copy">Toàn bộ tin nhắn trong cuộc trò chuyện này sẽ bị xoá và không thể khôi phục.</p>
+        <p id="xoa-dialog-note" class="confirm-note">Đơn hàng bạn đã đặt vẫn được giữ nguyên.</p>
+        <p id="xoa-dialog-error" class="confirm-error" role="alert" hidden></p>
+        <div class="confirm-actions">
+          <button id="huy-xoa-btn" type="button" class="confirm-btn confirm-btn-secondary">Giữ lại</button>
+          <button id="xac-nhan-xoa-btn" type="button" class="confirm-btn confirm-btn-danger">Xoá cuộc trò chuyện</button>
+        </div>
+      </section>
+    </div>
   </div>
 
-  <script src="widget.js?v=20261016"></script>
+  <script src="widget.js?v=20261023"></script>
 </body>
 </html>

@@ -25,7 +25,11 @@
       loiKetNoi: 'Không thể kết nối đến máy chủ. Vui lòng tải lại trang.',
       guiThatBai: 'Gửi tin thất bại.',
       loiTruyenTin: 'Có lỗi xảy ra khi truyền tin. Vui lòng thử lại.',
-      xacNhanXoa: 'Xoá toàn bộ lịch sử trò chuyện này?\n\nKhông thể khôi phục lại. Các đơn hàng bạn đã đặt vẫn được giữ nguyên.',
+      xacNhanXoa: 'Toàn bộ tin nhắn trong cuộc trò chuyện này sẽ bị xoá và không thể khôi phục.',
+      ghiChuXoa: 'Đơn hàng bạn đã đặt vẫn được giữ nguyên.',
+      huyXoa: 'Giữ lại',
+      nutXoa: 'Xoá cuộc trò chuyện',
+      dangXoa: 'Đang xoá...',
       daXoa: 'Đã xoá lịch sử trò chuyện.',
       xoaThatBai: 'Không xoá được lịch sử, vui lòng thử lại.',
       tieuDeXoa: 'Xoá lịch sử trò chuyện',
@@ -46,7 +50,11 @@
       loiKetNoi: 'Unable to connect to the server. Please reload the page.',
       guiThatBai: 'Failed to send message.',
       loiTruyenTin: 'Something went wrong while sending your message. Please try again.',
-      xacNhanXoa: 'Delete this entire chat history?\n\nThis cannot be undone. Orders you have placed will be kept.',
+      xacNhanXoa: 'All messages in this conversation will be deleted and cannot be recovered.',
+      ghiChuXoa: 'Orders you have placed will be kept.',
+      huyXoa: 'Keep chat',
+      nutXoa: 'Delete conversation',
+      dangXoa: 'Deleting...',
       daXoa: 'Chat history deleted.',
       xoaThatBai: 'Could not delete the history, please try again.',
       tieuDeXoa: 'Delete chat history',
@@ -77,6 +85,13 @@
   const merchantName = document.getElementById('merchant-name');
   const operatorStatus = document.getElementById('operator-status');
   const xoaLichSuBtn = document.getElementById('xoa-lich-su-btn');
+  const xoaDialog = document.getElementById('xoa-lich-su-dialog');
+  const xoaDialogTitle = document.getElementById('xoa-dialog-title');
+  const xoaDialogDesc = document.getElementById('xoa-dialog-desc');
+  const xoaDialogNote = document.getElementById('xoa-dialog-note');
+  const xoaDialogError = document.getElementById('xoa-dialog-error');
+  const huyXoaBtn = document.getElementById('huy-xoa-btn');
+  const xacNhanXoaBtn = document.getElementById('xac-nhan-xoa-btn');
 
   let sessionToken = '';
   let messagesCount = 0;
@@ -104,6 +119,13 @@
     if (xoaLichSuBtn) {
       xoaLichSuBtn.title = T('tieuDeXoa');
       xoaLichSuBtn.setAttribute('aria-label', T('tieuDeXoa'));
+    }
+    if (xoaDialog) {
+      xoaDialogTitle.textContent = T('tieuDeXoa') + '?';
+      xoaDialogDesc.textContent = T('xacNhanXoa');
+      xoaDialogNote.textContent = T('ghiChuXoa');
+      huyXoaBtn.textContent = T('huyXoa');
+      if (!xacNhanXoaBtn.disabled) xacNhanXoaBtn.textContent = T('nutXoa');
     }
   }
 
@@ -501,12 +523,53 @@
   // vẫn còn: khách xoá chat mà tưởng huỷ luôn đơn thì thành hiểu lầm tai hại.
   // ---------------------------------------------------------------------------
   if (xoaLichSuBtn) {
-    xoaLichSuBtn.addEventListener('click', async () => {
+    let nutTruocModal = null;
+
+    const dongXacNhanXoa = () => {
+      if (!xoaDialog || xacNhanXoaBtn.disabled) return;
+      xoaDialog.hidden = true;
+      if (nutTruocModal) nutTruocModal.focus();
+    };
+
+    const moXacNhanXoa = () => {
       if (!sessionToken) return;
-      const dong = confirm(T('xacNhanXoa'));
-      if (!dong) return;
+      nutTruocModal = document.activeElement;
+      xoaDialogError.hidden = true;
+      xoaDialogError.textContent = '';
+      xoaDialog.hidden = false;
+      requestAnimationFrame(() => huyXoaBtn.focus());
+    };
+
+    xoaLichSuBtn.addEventListener('click', moXacNhanXoa);
+    huyXoaBtn.addEventListener('click', dongXacNhanXoa);
+    xoaDialog.addEventListener('click', (event) => {
+      if (event.target === xoaDialog) dongXacNhanXoa();
+    });
+    xoaDialog.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        dongXacNhanXoa();
+        return;
+      }
+      if (event.key !== 'Tab') return;
+      const dau = huyXoaBtn;
+      const cuoi = xacNhanXoaBtn;
+      if (event.shiftKey && document.activeElement === dau) {
+        event.preventDefault();
+        cuoi.focus();
+      } else if (!event.shiftKey && document.activeElement === cuoi) {
+        event.preventDefault();
+        dau.focus();
+      }
+    });
+
+    xacNhanXoaBtn.addEventListener('click', async () => {
+      if (!sessionToken) return;
 
       xoaLichSuBtn.disabled = true;
+      huyXoaBtn.disabled = true;
+      xacNhanXoaBtn.disabled = true;
+      xacNhanXoaBtn.textContent = T('dangXoa');
       try {
         const res = await fetch(`${serverUrl}/v1/chat/xoa-lich-su`, {
           method: 'POST',
@@ -523,12 +586,17 @@
         chatMessages.innerHTML =
           `<div class="message system-message"><div class="bubble">${escapeHtml(T('daXoa'))}</div></div>`;
         sessionToken = '';
+        xoaDialog.hidden = true;
         await initSession();
       } catch (e) {
         console.error('[Widget] Xoá lịch sử lỗi:', e);
-        alert(T('xoaThatBai'));
+        xoaDialogError.textContent = T('xoaThatBai');
+        xoaDialogError.hidden = false;
       } finally {
         xoaLichSuBtn.disabled = false;
+        huyXoaBtn.disabled = false;
+        xacNhanXoaBtn.disabled = false;
+        xacNhanXoaBtn.textContent = T('nutXoa');
       }
     });
   }
