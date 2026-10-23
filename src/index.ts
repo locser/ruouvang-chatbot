@@ -32,6 +32,7 @@ import { layCaiDat } from "./services/caiDat";
 import { khoiDongOutboxDispatcher, dungOutboxDispatcher } from "./services/outboxDispatcher";
 
 import { quetTiemLenh } from "./worker";
+import { extractDocumentText, queueKnowledgeDocument, deleteKnowledgeDocument, KnowledgeIngestError, MAX_DOCUMENT_BYTES } from "./services/knowledgeIngest";
 import path from "path";
 
 const app = express();
@@ -47,6 +48,13 @@ app.use("/v1/auth",  cors({ origin: true, credentials: true }));
 app.use(cors());
 
 // Giới hạn kích thước body tường minh (mặc định 100kb quá nhỏ cho upload KB)
+// Route upload tri thức nhận file base64 (tối đa 20MB giải mã ≈ 27MB base64) — phải đăng ký TRƯỚC parser 1mb toàn cục.
+app.use("/v1/admin/kb/upload", express.json({ limit: "30mb" }), ((err: any, _req: Request, res: Response, next: NextFunction) => {
+  if (err?.type === "entity.too.large") {
+    return res.status(413).json({ error: "File quá lớn. Dung lượng tối đa 20MB." });
+  }
+  return next(err);
+}) as any);
 app.use(express.json({ limit: "1mb" }));
 
 // Serve Static Frontends
@@ -971,43 +979,43 @@ app.use("/v1/admin/settings", routerCaiDat);
 app.use("/v1/public", routerCongKhai);
 
 
-// Upload knowledge documents
+// Upload knowledge documents (PDF, DOCX, TXT, MD, CSV, XLSX) — nhận base64, giữ `content` văn bản cũ.
 app.post("/v1/admin/kb/upload", async (req: Request, res: Response) => {
-  const { tenantId, filename, content } = req.body;
-  if (!tenantId || !filename || !content) {
-    return res.status(400).json({ error: "Missing parameters" });
+  const { tenantId, filename, content, content_base64 } = req.body;
+  if (!tenantId || typeof filename !== "string" || !filename.trim() || (!content_base64 && !content)) {
+    return res.status(400).json({ error: "Thiếu tên file hoặc nội dung." });
   }
 
   try {
-    const documentId = await runInTenantContext(tenantId, async (client) => {
-      // Calculate simple checksum
-      const checksum = sha256(content);
-      
-      const result = await client.query(
-        `INSERT INTO kb_document (tenant_id, ten_file, loai, kich_thuoc, checksum, trang_thai) 
-         VALUES ($1, $2, $3, $4, $5, 'cho_xu_ly') 
-         RETURNING id`,
-        [tenantId, filename, filename.split(".").pop() || "txt", Buffer.byteLength(content), checksum]
-      );
-      return result.rows[0].id;
-    });
+    let buffer: Buffer;
+    if (typeof content_base64 === "string" && content_base64) {
+      buffer = Buffer.from(content_base64, "base64");
+    } else {
+      buffer = Buffer.from(String(content), "utf8");
+    }
+    if (buffer.length > MAX_DOCUMENT_BYTES) {
+      return res.status(413).json({ error: "File quá lớn. Dung lượng tối đa 20MB." });
+    }
+    if (buffer.length === 0) {
+      return res.status(400).json({ error: "File rỗng." });
+    }
 
-    // Enqueue background processing job
-    await documentQueue.add("ingest", {
+    const text = await extractDocumentText(buffer, filename.trim());
+    const result = await queueKnowledgeDocument({
       tenantId,
-      documentId,
-      filename,
-      s3Key: `uploads/${tenantId}/${documentId}`,
-      content,
+      filename: filename.trim(),
+      text,
+      sizeBytes: buffer.length,
+      source: "admin",
     });
-
-    return res.json({ document_id: documentId, status: "queued" });
+    return res.json({ document_id: result.documentId, status: result.status });
   } catch (error: any) {
-    if (error.code === "23505") { // duplicate key constraint (checksum duplicate)
-      return res.status(409).json({ error: "Redundant document upload. Already exists." });
+    if (error instanceof KnowledgeIngestError) {
+      const status = error.code === "duplicate" ? 409 : error.code === "too_large" ? 413 : 400;
+      return res.status(status).json({ error: error.message });
     }
     console.error("File upload error:", error);
-    return res.status(500).json({ error: "Internal server error" });
+    return res.status(500).json({ error: "Lỗi máy chủ khi nạp tài liệu." });
   }
 });
 
@@ -1719,13 +1727,28 @@ app.get("/v1/admin/tenants/:id/documents", async (req: Request, res: Response) =
   const tenantId = req.params.id;
   try {
     const result = await pool.query(
-      `SELECT ten_file as name, loai as type, kich_thuoc as size, trang_thai as status, loi as error 
+      `SELECT id, ten_file as name, loai as type, kich_thuoc as size, trang_thai as status, loi as error 
        FROM kb_document WHERE tenant_id = $1 ORDER BY tao_luc DESC`,
       [tenantId]
     );
     res.json(result.rows);
   } catch (error) {
     console.error("Fetch docs error:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.delete("/v1/admin/tenants/:tid/documents/:id", async (req: Request, res: Response) => {
+  const { tid, id } = req.params;
+  if (!new RegExp(`^${UUID_RE}$`, "i").test(id)) {
+    return res.status(400).json({ error: "Mã tài liệu không hợp lệ." });
+  }
+  try {
+    const deleted = await deleteKnowledgeDocument(tid, id);
+    if (!deleted) return res.status(404).json({ error: "Không tìm thấy tài liệu." });
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Delete document error:", error);
     res.status(500).json({ error: "Internal server error" });
   }
 });
