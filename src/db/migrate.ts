@@ -78,7 +78,9 @@ async function taoAdminDemo(client: import("pg").PoolClient): Promise<void> {
   if (daCo.rowCount) {
     const admin = daCo.rows[0];
     if (admin.username !== username || String(admin.email).toLowerCase() !== email) {
-      throw new Error(`Username/email bootstrap chatbot bị trùng với tài khoản khác (${admin.username}).`);
+      // DB đã có admin riêng (email khác): không tạo thêm, cũng không chặn khởi động.
+      console.warn(`[migrate] Bỏ qua admin demo: "${admin.username}" đã tồn tại với email khác.`);
+      return;
     }
     console.log(`[migrate] Admin chatbot "${username}" đã tồn tại — giữ nguyên mật khẩu.`);
     return;
