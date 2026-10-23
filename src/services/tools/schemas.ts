@@ -179,6 +179,19 @@ export const TOOL_SCHEMAS: ToolSchema[] = [
       }, ["phone"]),
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "get_store_locations",
+      description:
+        "Lấy danh sách chi nhánh/cửa hàng THẬT (tên, địa chỉ, số điện thoại, giờ mở cửa, link bản đồ). " +
+        "BẮT BUỘC gọi khi khách hỏi cửa hàng ở đâu, có chi nhánh nào, địa chỉ, giờ mở cửa, số điện thoại cửa hàng. " +
+        "Chỉ được nêu địa chỉ/giờ/số điện thoại lấy từ kết quả tool này.",
+      parameters: doiTuong({
+        area: { type: "string", description: "Khu vực khách quan tâm để lọc, ví dụ 'quận 1', 'Thủ Đức'. Bỏ trống nếu khách hỏi chung." },
+      }),
+    },
+  },
 ];
 
 /** Tra nhanh schema theo tên. */

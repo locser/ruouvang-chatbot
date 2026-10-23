@@ -1,6 +1,7 @@
 import { PoolClient } from "pg";
 import { encrypt, decrypt } from "./encryption";
 import { env } from "../config/env";
+import { fetchCoTimeout, TIMEOUT } from "./http";
 
 export interface MedusaConfig {
   enabled: boolean;
@@ -374,6 +375,27 @@ export async function medusaTraCuuDonHang(
   });
   if (!res.ok) throw new Error(`Tra cứu đơn hàng thất bại: ${await res.text()}`);
   return await res.json();
+}
+
+export interface StoreLocation {
+  id: string;
+  name: string;
+  address: string;
+  phone: string | null;
+  opening_hours: string | null;
+  maps_url: string | null;
+}
+
+/** Danh sách chi nhánh thật của cửa hàng (GET /ai/store-locations). */
+export async function medusaGetStoreLocations(config: MedusaConfig): Promise<StoreLocation[]> {
+  const res = await fetchCoTimeout(
+    `${config.baseUrl}/ai/store-locations`,
+    { method: "GET", headers: { "x-ai-secret-key": AI_SECRET_KEY } },
+    TIMEOUT.MEDUSA
+  );
+  if (!res.ok) throw new Error(`Lấy danh sách chi nhánh thất bại: ${res.status}`);
+  const body = await res.json();
+  return Array.isArray(body?.stores) ? body.stores : [];
 }
 
 /** Đẩy khách tiềm năng sang backend để lưu. Upsert theo conversation_id nên gọi lại an toàn. */

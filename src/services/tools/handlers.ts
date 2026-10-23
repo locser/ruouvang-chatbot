@@ -34,7 +34,10 @@ import {
   medusaGetPaymentInfo,
   medusaTraCuuDonHang,
   medusaLuuKhachTiemNang,
+  medusaGetStoreLocations,
+  StoreLocation,
 } from "../medusa";
+import { cache, buildTenantCacheKey } from "../cache";
 import { timSanPham, laySkuHopLe, ThamSoTimKiem } from "../search";
 import { lamGiauSanPham, dinhDangChoLLM, traCuuThat } from "../catalog";
 import {
@@ -711,6 +714,84 @@ export async function xuLySaveLead(nc: NguCanhTool, args: any): Promise<KetQuaTo
 }
 
 // ---------------------------------------------------------------------------
+// 12. get_store_locations — chi nhánh thật, không bịa
+// ---------------------------------------------------------------------------
+
+const STORE_LOCATIONS_TTL_SECONDS = 300;
+const NO_STORE_INFO_MESSAGE =
+  "Hiện chưa có thông tin chi nhánh từ hệ thống. Nếu mục TRI THỨC NỘI BỘ có thông tin cửa hàng thì dùng; " +
+  "nếu không, nói: Dạ em xin phép chuyển nhân viên hỗ trợ anh/chị ạ. TUYỆT ĐỐI không tự nêu địa chỉ hay số điện thoại.";
+
+function stripDiacritics(v: string): string {
+  return v.normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/đ/gi, "d").toLowerCase();
+}
+
+/** Chuẩn hoá để so khớp theo ranh giới từ: bỏ dấu, "q1"/"q.1" -> "quan 1", dấu câu -> khoảng trắng. */
+function normalizeForMatch(v: string): string {
+  const t = stripDiacritics(v)
+    .replace(/\bq\.?\s*(\d)/g, "quan $1")
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+  return ` ${t} `;
+}
+
+export async function xuLyGetStoreLocations(nc: NguCanhTool, args: any): Promise<KetQuaTool> {
+  if (!nc.medusa) return loi("NO_STORE_INFO", NO_STORE_INFO_MESSAGE);
+
+  const area = typeof args?.area === "string" ? args.area.trim() : "";
+  const key = buildTenantCacheKey(nc.tenantId, "store-locations", "all");
+
+  let stores: StoreLocation[] | null = null;
+  try {
+    const hit = await cache.get(key);
+    if (hit) {
+      const parsed = JSON.parse(hit);
+      stores = Array.isArray(parsed) ? parsed : null;
+    }
+  } catch {
+    stores = null;
+  }
+
+  if (!stores) {
+    try {
+      stores = await medusaGetStoreLocations(nc.medusa);
+    } catch (e) {
+      console.error("[Tool get_store_locations] Medusa lỗi:", e);
+      return loi("NO_STORE_INFO", NO_STORE_INFO_MESSAGE);
+    }
+    stores = stores.filter((s) => s && typeof s.address === "string" && s.address.trim() !== "");
+    if (stores.length > 0) {
+      await cache.set(key, JSON.stringify(stores), STORE_LOCATIONS_TTL_SECONDS).catch(() => undefined);
+    }
+  }
+
+  if (stores.length === 0) return loi("NO_STORE_INFO", NO_STORE_INFO_MESSAGE);
+
+  let matched = stores;
+  let areaMatched = true;
+  if (area) {
+    const needle = normalizeForMatch(area);
+    const filtered = stores.filter((s) => normalizeForMatch(`${s.name ?? ""} ${s.address ?? ""}`).includes(needle));
+    if (filtered.length > 0) matched = filtered;
+    else areaMatched = false; // không khớp khu vực: trả đủ danh sách, nói rõ cho mô hình
+  }
+
+  return thanhCong({
+    stores: matched.map((s) => ({
+      name: s.name,
+      address: s.address,
+      phone: s.phone ?? null,
+      opening_hours: s.opening_hours ?? null,
+      maps_url: s.maps_url ?? null,
+    })),
+    ...(area && !areaMatched
+      ? { luu_y: `Không có chi nhánh nào khớp khu vực "${area}"; đây là toàn bộ chi nhánh. Nói rõ điều này với khách.` }
+      : {}),
+    huong_dan: "Chỉ nêu thông tin có trong danh sách. Trường null nghĩa là chưa có thông tin, không tự điền.",
+  });
+}
+
+// ---------------------------------------------------------------------------
 // Bộ điều phối
 // ---------------------------------------------------------------------------
 
@@ -728,6 +809,7 @@ export const BANG_HANDLER: Record<string, HamXuLyTool> = {
   get_order_status: xuLyGetOrderStatus,
   escalate_to_human: xuLyEscalateToHuman,
   save_lead: xuLySaveLead,
+  get_store_locations: xuLyGetStoreLocations,
 };
 
 /**

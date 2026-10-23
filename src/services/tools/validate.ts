@@ -26,6 +26,7 @@ export const TEN_TOOL_HOP_LE = [
   "get_order_status",
   "escalate_to_human",
   "save_lead",
+  "get_store_locations",
 ] as const;
 
 export type TenTool = (typeof TEN_TOOL_HOP_LE)[number];
