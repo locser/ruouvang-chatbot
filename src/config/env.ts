@@ -91,6 +91,9 @@ export const env = {
   // lấy bằng `layCaiDat()` trong services/caiDat.ts. Sửa qua API
   // PUT /v1/admin/settings/:key hoặc `npm run settings`.
 
+  // Bật/tắt việc gửi cảnh báo từ backend (ai_outbox) vào nhóm Telegram của shop. Mặc định bật.
+  OUTBOX_DISPATCHER_ENABLED: !/^(0|false|off|no)$/i.test(process.env.CONFIG_OUTBOX_DISPATCHER_ENABLED || ""),
+
   // Khoá chia sẻ giữa chatbot và Medusa cho các endpoint /ai/*
   AI_SECRET_KEY: batBuocOProduction("CONFIG_INTERNAL_SERVICE_KEY", "dev_ai_secret_key"),
 

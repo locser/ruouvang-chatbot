@@ -28,7 +28,7 @@ import { hashPasswordAsync } from "../services/auth";
  */
 
 const BASELINE_MAC_DINH = "005";
-const PHIEN_BAN_SCHEMA = "011";
+const PHIEN_BAN_SCHEMA = "012";
 // Khóa theo phiên PostgreSQL, ngăn hai replica cùng áp một migration khi deploy.
 // Hai số cố định là namespace riêng của trình migration chatbot C.W. Wines.
 const KHOA_MIGRATION: [number, number] = [1129797481, 20261022];

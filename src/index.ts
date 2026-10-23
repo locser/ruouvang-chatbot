@@ -27,8 +27,9 @@ import { khachMuonChotDon, botHuaGuiQr } from "./services/checkoutIntent";
 import { chayOrchestrator, trangThaiMoi } from "./services/orchestrator";
 import { fetchJson } from "./services/http";
 import { routerCaiDat, routerCongKhai } from "./routes/caiDat";
-import { LoiThanThien, goiYDonHang, trongGiongLenh, laYeuCauVanHanh, laYeuCauVanHanhRoRang, xuLyCallbackVanHanh, xuLyYeuCauVanHanh } from "./services/telegramOperator";
+import { LoiThanThien, goiYDonHang, trongGiongLenh, laLenhGhiDonHang, laYeuCauVanHanh, laYeuCauVanHanhRoRang, xuLyCallbackVanHanh, xuLyYeuCauVanHanh } from "./services/telegramOperator";
 import { layCaiDat } from "./services/caiDat";
+import { khoiDongOutboxDispatcher, dungOutboxDispatcher } from "./services/outboxDispatcher";
 
 import { quetTiemLenh } from "./worker";
 import path from "path";
@@ -1394,7 +1395,13 @@ app.post("/v1/tg/webhook/:tenant_id", async (req: Request, res: Response) => {
           return r.rows[0]?.id ? String(r.rows[0].id) : null;
         });
 
-        if (conv) {
+        if (conv && laLenhGhiDonHang(text)) {
+          // Câu khớp lệnh huỷ/duyệt/nhận tiền khi đang chat với khách: tuyệt đối không gửi cho khách.
+          await guiTinQuaBot(bot, {
+            chat_id: chatId,
+            text: "Anh/chị đang chat với khách nên em chưa gửi câu này đi. Muốn thao tác đơn thì gõ /ops trước, ví dụ: /ops huỷ đơn 12",
+          });
+        } else if (conv) {
           // Kiểm tra tuân thủ với chính lời nhân viên gõ (F-15)
           const claims = assertSafeTranslation("vi-VN", text);
           const isBlocked = claims.some((c) => c.level === "BLOCK");
@@ -2509,11 +2516,13 @@ if (require.main === module) {
     const server = app.listen(env.PORT, () => {
       console.log(`Express Chatbot Gateway is running on port ${env.PORT} in ${env.NODE_ENV} mode.`);
     });
+    khoiDongOutboxDispatcher();
 
     let dangTat = false;
     async function tatAnToan(tinHieu: string) {
       if (dangTat) return;
       dangTat = true;
+      dungOutboxDispatcher();
       console.log(`[Shutdown] Nhận ${tinHieu} — đang đóng an toàn...`);
 
       // Cưỡng bức thoát nếu quá 15s để không treo quá trình deploy

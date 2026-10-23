@@ -8,7 +8,7 @@ import { layCaiDat } from "./caiDat";
 import { fetchCoTimeout, fetchJson, TIMEOUT } from "./http";
 import { env } from "../config/env";
 
-type LoaiLenh = "inventory_adjust" | "create_product" | "inventory_lookup" | "order_list_pending" | "order_complete" | "order_lookup" | "order_payment_received" | "revenue_report";
+type LoaiLenh = "inventory_adjust" | "create_product" | "inventory_lookup" | "order_list_pending" | "order_complete" | "order_lookup" | "order_payment_received" | "order_cancel" | "revenue_report";
 
 export interface LenhVanHanh {
   type: LoaiLenh;
@@ -54,6 +54,7 @@ const CALLBACK_LIST = "ops_list";
 const CALLBACK_PAY_RE = /^ops_pay_(\d{1,9})$/;
 const CALLBACK_REPORT_RE = /^ops_rep_(1|7|30|today|this_week|this_month)$/;
 const CALLBACK_XEM_RE = /^ops_view_(\d{1,9})$/;
+const CALLBACK_HUY_RE = /^ops_cxl_(\d{1,9})$/;
 const CALLBACK_RE = new RegExp(`^ops_(ok|no|pick)_(${UUID_RE})(?:_(\\d+))?$`, "i");
 
 function html(v: unknown): string {
@@ -92,6 +93,8 @@ export function phanTichLenhDonHang(raw: string): LenhVanHanh | null {
 
   const khac = phanTichNhanTienVaBaoCao(plain);
   if (khac) return khac;
+  const huy = phanTichHuyDon(plain, text);
+  if (huy) return huy;
 
   // Mọi mẫu đều NEO đầu và cuối câu: nhân viên nhắn khách ("Em xác nhận đơn 12
   // cho anh rồi nhé", "đơn 3 chai vang đỏ") thì không khớp.
@@ -127,6 +130,24 @@ export function phanTichLenhDonHang(raw: string): LenhVanHanh | null {
     return { type: "order_list_pending" };
   }
   return phanTichTraDon(text, plain, raw);
+}
+
+/**
+ * Huỷ đơn ("huỷ đơn 12", "huy don CW12 giúp em"): lệnh ghi không hoàn tác được nên neo CẢ câu,
+ * bắt buộc có chữ "đơn" và bắt đầu bằng động từ huỷ. Câu hỏi, phủ định, câu kể ("đừng huỷ đơn 12",
+ * "đơn 12 bị huỷ rồi", "khách muốn huỷ đơn 12 không ạ") và số tiền/SĐT đều không khớp.
+ */
+function phanTichHuyDon(plain: string, goc: string): LenhVanHanh | null {
+  // Câu hỏi ("huỷ đơn 12?", "huỷ đơn 12 à", "... không") không bao giờ là lệnh.
+  if (/\?/.test(goc) || /(?:^|\s)(?:à|ả|hả|hở|không|khong|chưa|chua)\s*[.!,;:…]*$/i.test(goc.trim())) return null;
+  const dem = "(?:(?:vui long|nho|hay|giup em|giup minh|cho em|cho minh|anh oi|chi oi|em oi|oi)\\s+)*";
+  const duoi = "(?:\\s+(?:nhe|nha|ne|di|ngay|a|voi|luon|giup|gium|dum|em|minh|anh|chi))*";
+  const m = plain.match(new RegExp(`^${dem}huy\\s+don(?:\\s+hang)?\\s*(?:so\\s*|ma\\s*)?(?:#\\s*|cw\\s*)?(\\d{1,6})${duoi}$`));
+  if (!m) return null;
+  // Số đơn tối đa 6 chữ số; bắt đầu bằng 0 là số điện thoại.
+  if (m[1].startsWith("0")) return null;
+  const n = Number(m[1]);
+  return Number.isSafeInteger(n) && n > 0 ? { type: "order_cancel", order_number: n } : null;
 }
 
 /** Nhận tiền chuyển khoản ("đã nhận tiền đơn 12", "đơn 12 đã ck") và báo cáo doanh thu ("doanh thu 7 ngày"): neo cả câu. */
@@ -261,6 +282,18 @@ export function goiYDonHang(raw: string, laChatRieng: boolean): { text: string; 
       reply_markup: { inline_keyboard: [[{ text: `💰 Đã nhận tiền đơn #${soDon[0]}`, callback_data: `ops_pay_${soDon[0]}` }]] },
     };
   }
+  // Huỷ đơn: chỉ gợi ý ở chat riêng, hoặc khi câu BẮT ĐẦU bằng "huỷ đơn". Câu phủ định/kể/hỏi thì im lặng.
+  const batDauHuy = /^(?:(?:vui long|nho|hay|giup em|giup minh|cho em|cho minh|anh oi|chi oi|em oi|oi)\s+)*huy\s+don\b/.test(plain);
+  // Số đơn cho lệnh huỷ: tối đa 6 chữ số, không phải số có dấu ngăn nghìn, không đứng trước đơn vị (12 chai, 500k, 2 triệu).
+  const soDonHuy = Array.from(new Set(Array.from(plain.matchAll(/(?:\bdon(?:\s+hang)?(?:\s*so)?\s*|#\s*|\bcw\s*)(\d{1,6})(?!\d)(?![.,]\d)(?![a-z])(?!\s*(?:tr|trieu|nghin|ngan|dong|d|vnd|aud|k|chai|hop|thung|ly|cai|sp|san pham)\b)/g)).map((m) => Number(m[1])))).filter((n) => n > 0);
+  if (soDonHuy.length >= 1 && soDonHuy.length === so.length && /\bhuy\b/.test(plain) && (laChatRieng || batDauHuy) &&
+    !/\b(?:khong|dung|chua|roi|bi|da|muon|neu|co nen|co the)\b/.test(plain) && !text.includes("?")) {
+    const ds = soDonHuy.slice(0, 5);
+    return {
+      text: ds.length === 1 ? `Anh/chị muốn huỷ đơn #${ds[0]} phải không? Em sẽ hỏi xác nhận trước khi huỷ.` : `Anh/chị muốn huỷ đơn nào: ${ds.map((n) => `#${n}`).join(" hay ")}?`,
+      reply_markup: { inline_keyboard: ds.map((n) => [{ text: `❌ Huỷ đơn #${n}`, callback_data: `ops_cxl_${n}` }]) },
+    };
+  }
   if (/\b(?:doanh\s+thu|doanh\s+so)\b/.test(plain) || (laChatRieng && /\bbao\s+cao\b/.test(plain))) {
     return { text: "Anh/chị muốn xem doanh thu trong bao lâu?", reply_markup: { inline_keyboard: [nutBaoCao()] } };
   }
@@ -286,7 +319,7 @@ export function goiYDonHang(raw: string, laChatRieng: boolean): { text: string; 
     };
   }
   if (laChatRieng && /\bdon\b/.test(plain)) {
-    return { text: "Anh/chị gõ “đơn mới” để xem đơn chờ duyệt, “duyệt đơn 12”, “đã nhận tiền đơn 12” hoặc “doanh thu 7 ngày”." };
+    return { text: "Anh/chị gõ “đơn mới” để xem đơn chờ duyệt, “duyệt đơn 12”, “đã nhận tiền đơn 12” “huỷ đơn 12” hoặc “doanh thu 7 ngày”." };
   }
   return null;
 }
@@ -347,6 +380,12 @@ export function phanTichLenhNhanh(raw: string): LenhVanHanh | null {
   }
 
   return null;
+}
+
+/** Câu khớp lệnh GHI về đơn (huỷ / duyệt / nhận tiền): khi đang tiếp quản khách không được gửi câu này cho khách. */
+export function laLenhGhiDonHang(raw: string): boolean {
+  const t = phanTichLenhDonHang(raw)?.type;
+  return t === "order_cancel" || t === "order_complete" || t === "order_payment_received";
 }
 
 /** Tin chỉ là câu nói về đơn hàng, không có /ops hay @bot. Người ngoài nhân viên gõ thì bỏ qua, không báo lỗi. */
@@ -454,7 +493,7 @@ async function phanTichBangAi(text: string): Promise<LenhVanHanh | null> {
     { role: "system", content:
       "Bạn là bộ phân tích lệnh vận hành kho. Chỉ gọi đúng một tool khi nhân viên yêu cầu rõ. " +
       "Không đoán SKU, giá, số lượng. 'nhập thêm N' là quantity_change dương; 'xuất/giảm N' là âm. " +
-      "Hỏi đơn mới/đơn chưa duyệt thì gọi order_list_pending; xem/tra đơn thì gọi order_lookup (không duyệt); duyệt/xác nhận đơn N thì gọi order_complete với số đơn N. " +
+      "Hỏi đơn mới/đơn chưa duyệt thì gọi order_list_pending; xem/tra đơn thì gọi order_lookup (không duyệt); duyệt/xác nhận đơn N thì gọi order_complete với số đơn N. Bạn không có tool huỷ đơn; không đề xuất huỷ đơn. " +
       "Nếu chưa đủ dữ kiện thì không gọi tool." },
     { role: "user", content: text },
   ];
@@ -609,11 +648,29 @@ async function taoAction(tenantId: string, chatId: string, messageId: string | n
   });
 }
 
-function nutXacNhan(id: string) {
+function nutXacNhan(id: string, type?: LoaiLenh) {
+  if (type === "order_cancel") {
+    return { inline_keyboard: [[
+      { text: "⚠️ Xác nhận HUỶ ĐƠN", callback_data: `ops_ok_${id}` },
+      { text: "↩️ Không huỷ nữa", callback_data: `ops_no_${id}` },
+    ]] };
+  }
   return { inline_keyboard: [[
     { text: "✅ Xác nhận", callback_data: `ops_ok_${id}` },
     { text: "❌ Huỷ", callback_data: `ops_no_${id}` },
   ]] };
+}
+
+function cheSdt(v: unknown): string {
+  const d = String(v ?? "").replace(/\D/g, "");
+  if (!d) return "";
+  return d.length >= 7 ? `${d.slice(0, 2)}xx***${d.slice(-3)}` : "***";
+}
+
+function dongTienKhiHuy(t: unknown, tong: unknown): string {
+  if (t === "da_thanh_toan") return `💸 Khách ĐÃ chuyển ${dinhDangTien(tong)}. Huỷ xong anh/chị phải TỰ chuyển khoản trả lại khách — hệ thống chỉ ghi sổ, không tự trả tiền.`;
+  if (t === "cod") return "💵 Thu khi giao, chưa thu tiền nên không có gì phải trả lại.";
+  return "Anh/chị kiểm tra khách đã chuyển tiền chưa; nếu rồi thì phải tự chuyển trả.";
 }
 
 async function guiBanNhap(bot: BotShop, chatId: string, id: string, type: LoaiLenh, payload: any): Promise<void> {
@@ -627,6 +684,10 @@ async function guiBanNhap(bot: BotShop, chatId: string, id: string, type: LoaiLe
     text = `🧾 <b>Duyệt đơn #${html(payload.display_id)}?</b>\n👤 ${html(payload.customer_name || "Khách lẻ")}\n${mon}\n💰 Tổng: <b>${dinhDangTien(payload.total_vnd)}</b>${dongTien(payload.payment_status) ? `\n${dongTien(payload.payment_status)}` : ""}\n\nDuyệt xong kho sẽ được trừ. Bấm Xác nhận để duyệt nhé.`;
   } else if (type === "order_payment_received") {
     text = `💰 <b>Xác nhận đã nhận tiền chuyển khoản đơn #${html(payload.display_id)}?</b>\nKhách: ${html(payload.customer_name || "Khách lẻ")}\nSố tiền: <b>${dinhDangTien(payload.total_vnd)}</b>\n\nAnh/chị kiểm tra tài khoản ngân hàng đã có tiền rồi hãy bấm Xác nhận.`;
+  } else if (type === "order_cancel") {
+    const mon = (Array.isArray(payload.items) ? payload.items : []).slice(0, 10)
+      .map((it: any) => `• ${html(it.quantity)} × ${html(it.title)}`).join("\n");
+    text = `⚠️ <b>Huỷ đơn #${html(payload.display_id)}?</b>\nKhách: ${html(payload.customer_name || "Khách lẻ")}${payload.customer_phone_masked ? ` · ${html(payload.customer_phone_masked)}` : ""}\n${mon ? `${mon}\n` : ""}Tổng: <b>${dinhDangTien(payload.total_vnd)}</b>\n${html(dongTienKhiHuy(payload.payment_status, payload.total_vnd))}\nKhách KHÔNG được báo tự động — anh/chị nhắn khách giúp em.\n\n<b>Thao tác này không hoàn tác được.</b>`;
   } else if (type === "inventory_lookup") {
     text = `🔎 Tra tồn kho <b>${html(payload.title)}</b> — SKU <code>${html(payload.sku)}</code>?`;
   } else {
@@ -634,7 +695,7 @@ async function guiBanNhap(bot: BotShop, chatId: string, id: string, type: LoaiLe
       (payload.price_vnd != null ? `\nGiá: ${Number(payload.price_vnd).toLocaleString("vi-VN")}đ` : "\nGiá: chưa nhập") +
       (payload.initial_quantity != null ? `\nTồn đầu: ${html(payload.initial_quantity)}` : "\nTồn đầu: 0");
   }
-  const markup: any = nutXacNhan(id);
+  const markup: any = nutXacNhan(id, type);
   if (type === "order_complete" && payload.payment_status === "cho_chuyen_khoan") {
     markup.inline_keyboard.push([{ text: "💰 Đã nhận tiền", callback_data: `ops_pay_${payload.display_id}` }]);
   }
@@ -752,6 +813,8 @@ async function guiMotDon(bot: BotShop, chatId: string, o: DonChoDuyet): Promise<
       const hang: Array<Array<{ text: string; callback_data: string }>> = [];
       if (o.status === "pending") hang.push([{ text: "✅ Duyệt đơn này", callback_data: `ops_ord_${o.display_id}` }]);
       if (o.payment_status === "cho_chuyen_khoan" && o.status !== "canceled") hang.push([{ text: "💰 Đã nhận tiền", callback_data: `ops_pay_${o.display_id}` }]);
+      // Nút nguy hiểm đặt cuối, nhãn rõ để không bấm nhầm. Vẫn phải qua bản nháp + Xác nhận.
+      if (o.status === "pending") hang.push([{ text: "❌ Huỷ đơn này (hoàn tiền nếu đã thu)", callback_data: `ops_cxl_${o.display_id}` }]);
       return hang.length ? { inline_keyboard: hang } : undefined;
     })(),
   });
@@ -833,6 +896,45 @@ async function lapBanNhapNhanTien(bot: BotShop, tenantId: string, chatId: string
   if (action.created) await guiBanNhap(bot, chatId, action.id, "order_payment_received", payload);
 }
 
+async function lapBanNhapHuyDon(bot: BotShop, tenantId: string, chatId: string, operatorId: string,
+  messageId: string | null, soDon: number, originalText: string): Promise<void> {
+  const cfg = await layMedusa(tenantId);
+  const don = chonDonTheoSo(await layDon(cfg, { display_id: String(soDon) }), soDon);
+  if (!don) throw new LoiThanThien(`Không tìm thấy đơn số ${soDon}. Anh/chị kiểm tra lại số đơn giúp em nhé.`);
+  if (don.status === "canceled") throw new LoiThanThien(`Đơn #${soDon} đã được huỷ rồi, không cần làm gì thêm.`);
+  if (don.status === "completed") throw new LoiThanThien(`Đơn #${soDon} đã được duyệt (đã xuất kho), bot không huỷ được. Nếu khách trả hàng, anh/chị báo quản lý.`);
+  if (don.status !== "pending") throw new LoiThanThien(`Đơn #${soDon} hiện không huỷ được. Anh/chị kiểm tra đơn trong trang quản trị hoặc báo quản lý giúp em.`);
+  const payload = {
+    order_id: don.id,
+    display_id: don.display_id,
+    customer_name: don.customer?.name || "Khách lẻ",
+    customer_phone_masked: cheSdt(don.customer?.phone),
+    total_vnd: don.total_vnd,
+    payment_status: don.payment_status ?? null,
+    items: (don.items ?? []).map((it) => ({ title: it.title, quantity: it.quantity })),
+  };
+  // Bản nháp huỷ là của riêng người tạo (chỉ người đó xác nhận được), nên chỉ gửi lại bản của chính họ.
+  const cu = await runInTenantContext(tenantId, async (client) => {
+    const r = await client.query(
+      `SELECT id FROM telegram_operator_action
+        WHERE tenant_id=$1 AND telegram_chat_id=$2 AND action_type='order_cancel'
+          AND status='awaiting_confirmation' AND expires_at > now() AND payload->>'order_id'=$3
+          AND requested_by=$4
+        ORDER BY created_at DESC LIMIT 1`,
+      [tenantId, chatId, don.id, operatorId]
+    );
+    const id = r.rows[0]?.id ? String(r.rows[0].id) : null;
+    if (id) await giaHanBanNhap(client, tenantId, id);
+    return id;
+  });
+  if (cu) {
+    await guiBanNhap(bot, chatId, cu, "order_cancel", payload);
+    return;
+  }
+  const action = await taoAction(tenantId, chatId, messageId, operatorId, "order_cancel", "awaiting_confirmation", payload, originalText);
+  if (action.created) await guiBanNhap(bot, chatId, action.id, "order_cancel", payload);
+}
+
 const NHAN_KY_BAO_CAO: Record<string, string> = {
   today: "Hôm nay (từ 0h)", this_week: "Tuần này (từ thứ Hai)", this_month: "Tháng này (từ ngày 1)",
 };
@@ -897,6 +999,7 @@ export async function xuLyYeuCauVanHanh(bot: BotShop, tenantId: string, message:
       "• <code>đơn mới</code> hoặc <code>có đơn nào chưa duyệt</code>: xem đơn chờ duyệt\n" +
       "• <code>duyệt đơn 12</code>: duyệt đơn số 12\n" +
       "• <code>đã nhận tiền đơn 12</code>: ghi nhận khách đã chuyển khoản\n" +
+      "• <code>huỷ đơn 12</code>: huỷ cả đơn chưa duyệt (nếu khách đã chuyển tiền thì phải tự chuyển trả)\n" +
       "• <code>doanh thu hôm nay</code>, <code>doanh thu 7 ngày</code>: xem doanh thu\n" +
       "• <code>xem đơn 12</code>, <code>tra đơn chị Lan</code>, <code>đơn của 0912345678</code>: xem thông tin đơn\n" +
       "• Gửi ảnh nhãn chai kèm chú thích <code>/ops mới nhập thêm 30 chai</code>\n\n" +
@@ -922,6 +1025,12 @@ export async function xuLyYeuCauVanHanh(bot: BotShop, tenantId: string, message:
     const n = Number(lenh.order_number);
     if (!Number.isSafeInteger(n) || n <= 0) throw new LoiThanThien("Anh/chị cho em xin số đơn nhé, ví dụ: đã nhận tiền đơn 12.");
     await lapBanNhapNhanTien(bot, tenantId, chatId, operatorId, messageId, n, text);
+    return;
+  }
+  if (lenh.type === "order_cancel") {
+    const n = Number(lenh.order_number);
+    if (!Number.isSafeInteger(n) || n <= 0) throw new LoiThanThien("Anh/chị cho em xin số đơn nhé, ví dụ: huỷ đơn 12.");
+    await lapBanNhapHuyDon(bot, tenantId, chatId, operatorId, messageId, n, text);
     return;
   }
   if (lenh.type === "revenue_report") {
@@ -1019,6 +1128,47 @@ async function ghiNhanTienBackend(cfg: MedusaConfig, p: any): Promise<any> {
   }
 }
 
+/**
+ * Gọi /ai/refund-order (huỷ toàn bộ, không partial). Backend mới trả `code` (order_not_found,
+ * order_completed, has_fulfillment, order_status_invalid, in_progress, lock_error, internal_error);
+ * backend cũ không có `code` (mọi lỗi workflow là 500) nên fallback theo HTTP status, không đọc câu chữ.
+ * LƯU Ý: provider thanh toán mặc định chỉ GHI SỔ hoàn tiền, không có tiền về khách.
+ */
+async function huyDonBackend(cfg: MedusaConfig, p: any): Promise<any> {
+  const so = p.display_id;
+  const lai = `gõ lại “huỷ đơn ${so}” để em kiểm tra tình trạng đơn`;
+  let res: Response;
+  try {
+    res = await fetchCoTimeout(new URL("/ai/refund-order", cfg.baseUrl).toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-ai-secret-key": env.AI_SECRET_KEY },
+      body: JSON.stringify({ orderId: p.order_id, reason: "Huỷ qua Telegram" }),
+    }, 60_000);
+  } catch (e) {
+    console.error("[telegram-operator] refund-order lỗi mạng:", e);
+    throw new LoiThanThien(`Chưa rõ đơn #${so} đã huỷ chưa. Anh/chị ${lai} nhé.`);
+  }
+  const body: any = await res.json().catch(() => ({}));
+  if (res.ok) return body;
+  const code = String(body?.code || "");
+  console.error(`[telegram-operator] refund-order ${res.status} code=${code}`);
+  if (res.status === 401 || code === "unauthorized") throw new LoiThanThien("Bot chưa kết nối được hệ thống bán hàng, anh/chị báo người quản trị giúp em.");
+  switch (code) {
+    case "order_not_found": throw new LoiThanThien(`Không tìm thấy đơn số ${so}. Anh/chị kiểm tra lại số đơn giúp em nhé.`);
+    case "order_completed":
+    case "has_fulfillment":
+      throw new LoiThanThien(`Đơn #${so} đã được duyệt (đã xuất kho) nên bot không huỷ được; cần làm trả hàng, anh/chị báo quản lý.`);
+    case "order_status_invalid": throw new LoiThanThien(`Đơn #${so} hiện không huỷ được. Anh/chị kiểm tra đơn trong trang quản trị hoặc báo quản lý giúp em.`);
+    case "in_progress": throw new LoiThanThien(`Đơn #${so} đang được xử lý. Anh/chị đợi vài giây rồi ${lai} nhé.`);
+    case "lock_error":
+    case "internal_error":
+      throw new LoiThanThien(`Chưa huỷ được đơn #${so} vì hệ thống đang lỗi. Anh/chị ${lai} sau ít phút nhé.`);
+  }
+  if (res.status === 404) throw new LoiThanThien(`Không tìm thấy đơn số ${so}. Anh/chị kiểm tra lại số đơn giúp em nhé.`);
+  if (res.status === 400) throw new LoiThanThien(`Chưa huỷ được đơn #${so} vì thiếu thông tin đơn. Anh/chị báo người quản trị giúp em.`);
+  throw new LoiThanThien(`Chưa huỷ được đơn #${so}. Có thể đơn đã được duyệt hoặc hệ thống đang lỗi. Anh/chị ${lai}, hoặc báo quản lý nếu đơn đã duyệt.`);
+}
+
 /** Gọi /ai/order-complete và đổi mọi lỗi thành lời nhắn dễ hiểu. */
 async function duyetDonBackend(cfg: MedusaConfig, p: any): Promise<any> {
   const so = p.display_id;
@@ -1064,6 +1214,7 @@ async function thucThi(tenantId: string, action: any): Promise<any> {
   }
   if (action.action_type === "order_complete") return duyetDonBackend(cfg, p);
   if (action.action_type === "order_payment_received") return ghiNhanTienBackend(cfg, p);
+  if (action.action_type === "order_cancel") return huyDonBackend(cfg, p);
   return goiBackend(cfg, "/ai/create-product", {
     product: { title: p.title, description: p.description, sku: p.sku, price_vnd: p.price_vnd },
     initial_quantity: Number(p.initial_quantity || 0),
@@ -1096,6 +1247,19 @@ export async function xuLyCallbackVanHanh(bot: BotShop, tenantId: string, callba
     } catch (e: any) {
       if (!(e instanceof LoiThanThien)) console.error("[telegram-operator] nút tiền/báo cáo lỗi:", e);
       await guiTinQuaBot(bot, { chat_id: chat, text: `⚠️ ${html(e instanceof LoiThanThien ? e.message : "Em chưa làm được việc này. Anh/chị thử lại sau ít phút giúp em nhé.")}`, parse_mode: "HTML" });
+    }
+    return true;
+  }
+  const khopHuy = String(callback.data || "").match(CALLBACK_HUY_RE);
+  if (khopHuy) {
+    // Nút "Huỷ đơn": chưa huỷ gì, chỉ dựng bản nháp để nhân viên bấm Xác nhận.
+    const chat = String(callback.message?.chat?.id || "");
+    await answerCallbackQuery(bot, callback.id, "Đang mở đơn…");
+    try {
+      await lapBanNhapHuyDon(bot, tenantId, chat, String(callback.from?.id || ""), `cb:${callback.id}`, Number(khopHuy[1]), callback.data || "");
+    } catch (e: any) {
+      if (!(e instanceof LoiThanThien)) console.error("[telegram-operator] mở đơn để huỷ lỗi:", e);
+      await guiTinQuaBot(bot, { chat_id: chat, text: `⚠️ ${html(e instanceof LoiThanThien ? e.message : "Em chưa mở được đơn này. Anh/chị thử lại sau ít phút giúp em nhé.")}`, parse_mode: "HTML" });
     }
     return true;
   }
@@ -1180,12 +1344,27 @@ export async function xuLyCallbackVanHanh(bot: BotShop, tenantId: string, callba
           SET status='executing', confirmed_by=$1
         WHERE id=$2 AND tenant_id=$3 AND telegram_chat_id=$4
           AND status='awaiting_confirmation' AND expires_at > now()
+          AND (action_type <> 'order_cancel' OR requested_by = $1)
         RETURNING *`,
       [operatorId, id, tenantId, chatId]
     );
     return r.rows[0] || null;
   });
   if (!action) {
+    // Lệnh huỷ đơn chỉ người tạo mới xác nhận được: báo rõ nếu bị chặn vì lý do này.
+    const cuaNguoiKhac = await runInTenantContext(tenantId, async (client) => {
+      const r = await client.query(
+        `SELECT 1 FROM telegram_operator_action
+          WHERE id=$1 AND tenant_id=$2 AND telegram_chat_id=$3 AND action_type='order_cancel'
+            AND status='awaiting_confirmation' AND expires_at > now() AND requested_by <> $4`,
+        [id, tenantId, chatId, operatorId]
+      );
+      return r.rows.length > 0;
+    });
+    if (cuaNguoiKhac) {
+      await answerCallbackQuery(bot, callback.id, "Chỉ người tạo lệnh huỷ mới xác nhận được.", true);
+      return true;
+    }
     await answerCallbackQuery(bot, callback.id, "Thao tác đã chạy, bị huỷ hoặc hết hạn.", true);
     return true;
   }
@@ -1214,6 +1393,17 @@ export async function xuLyCallbackVanHanh(bot: BotShop, tenantId: string, callba
         replyMarkup = { inline_keyboard: [[{ text: "✅ Duyệt đơn này", callback_data: `ops_ord_${p.display_id}` }]] };
       }
     }
+    if (action.action_type === "order_cancel") {
+      if (result?.already === true) text = `ℹ️ Đơn #${html(p.display_id)} đã được huỷ rồi.`;
+      else {
+        const daThu = Number(result?.paid_amount);
+        const canTra = typeof result?.needs_manual_refund === "boolean" ? result.needs_manual_refund : p.payment_status === "da_thanh_toan";
+        const soTien = Number.isFinite(daThu) && daThu > 0 ? daThu : Number(p.total_vnd);
+        text = `✅ Đã huỷ đơn #${html(p.display_id)}.` + (canTra
+          ? `\n⚠️ Nhớ chuyển trả ${dinhDangTien(soTien)} cho khách và nhắn khách biết.`
+          : "\nKhách không được báo tự động — anh/chị nhắn khách giúp em.");
+      }
+    }
     if (action.action_type === "order_complete") {
       text = result?.da_xu_ly_truoc_do
         ? `ℹ️ Đơn #${html(p.display_id)} đã được duyệt trước đó rồi.`
@@ -1233,8 +1423,8 @@ export async function xuLyCallbackVanHanh(bot: BotShop, tenantId: string, callba
       `UPDATE telegram_operator_action SET status='failed', error=$1 WHERE id=$2 AND tenant_id=$3`,
       [loi, id, tenantId]
     ));
-    const thanThien = action.action_type === "order_complete" || action.action_type === "order_payment_received"
-      ? (e instanceof LoiThanThien ? e.message : `Chưa ${action.action_type === "order_complete" ? "duyệt được" : "ghi nhận được tiền của"} đơn #${action.payload?.display_id ?? ""}. Anh/chị thử lại sau ít phút giúp em nhé.`)
+    const thanThien = action.action_type === "order_complete" || action.action_type === "order_payment_received" || action.action_type === "order_cancel"
+      ? (e instanceof LoiThanThien ? e.message : `Chưa ${action.action_type === "order_complete" ? "duyệt được" : action.action_type === "order_cancel" ? "huỷ được" : "ghi nhận được tiền của"} đơn #${action.payload?.display_id ?? ""}. Anh/chị thử lại sau ít phút giúp em nhé.`)
       : `Không thực hiện được: ${loi}`;
     await guiTinQuaBot(bot, { chat_id: chatId, text: `❌ ${html(thanThien)}`, parse_mode: "HTML" });
   }

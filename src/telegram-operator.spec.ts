@@ -4,8 +4,9 @@ jest.mock("./services/medusa", () => ({ getTenantMedusaConfig: jest.fn(async () 
 jest.mock("./services/http", () => ({
   fetchJson: jest.fn(), fetchCoTimeout: jest.fn(), TIMEOUT: { TELEGRAM: 5000 },
 }));
+jest.mock("./services/llm", () => ({ goiDeepSeekCoTool: jest.fn() }));
 import {
-  goiYDonHang, trongGiongLenh, canhBaoDeHieu,
+  goiYDonHang, trongGiongLenh, laLenhGhiDonHang, canhBaoDeHieu,
   laYeuCauVanHanh, phanTichLenhNhanh, phanTichLenhDonHang, chonDonTheoSo, dinhDangTien,
   xuLyYeuCauVanHanh, xuLyCallbackVanHanh,
 } from "./services/telegramOperator";
@@ -13,6 +14,7 @@ import { guiTinQuaBot } from "./services/telegram";
 import { runInTenantContext } from "./db/client";
 import { fetchJson, fetchCoTimeout } from "./services/http";
 import { getTenantMedusaConfig } from "./services/medusa";
+import { goiDeepSeekCoTool } from "./services/llm";
 
 describe("Telegram operator", () => {
   const bot: any = { username: "cwwines_bot" };
@@ -648,6 +650,229 @@ describe("Telegram operator: đơn hàng", () => {
     test("body không phải JSON: câu chung", async () => {
       const m = await xacNhan({ ok: false, status: 502, json: async () => { throw new Error("x"); } });
       expect(m.text).toContain("Chưa rõ đơn #12 đã ghi nhận tiền chưa");
+    });
+  });
+
+  describe("huỷ đơn (ghi, không hoàn tác)", () => {
+    test.each([
+      "huỷ đơn 12", "hủy đơn 12", "huy don 12", "Huỷ đơn CW12 giúp em", "huỷ đơn #12", "huỷ đơn số 12 nhé", "vui lòng huỷ đơn 12", "hủy đơn hàng 12 đi", "/ops huỷ đơn 12",
+    ])("hiểu câu huỷ đơn: %s", (cau) => {
+      expect(phanTichLenhDonHang(cau)).toEqual({ type: "order_cancel", order_number: 12 });
+      expect(phanTichLenhNhanh(cau)).toEqual({ type: "order_cancel", order_number: 12 });
+    });
+
+    test.each([
+      "khách muốn huỷ đơn 12 không ạ?", "đừng huỷ đơn 12", "đơn 12 bị huỷ rồi", "đã huỷ đơn 12", "không huỷ đơn 12", "em huỷ đơn 12 cho anh rồi nhé",
+      "huỷ đơn 12 được không", "huỷ đơn 12?", "Huỷ đơn 12 à?", "huỷ đơn 12 luôn à", "huy don 12 khong", "huỷ đơn 12 chưa", "huỷ đơn 1.250", "huỷ đơn 1,250", "huỷ đơn 1234567", "huỷ đơn 3 chai vang đỏ", "huỷ đơn 500k", "huỷ đơn 0912345678", "huỷ đơn 091234567", "huỷ đơn", "huỷ 12", "huỷ đơn 12 và 13",
+      "chị Lan nhờ huỷ đơn 12", "nếu khách huỷ đơn 12 thì báo em",
+    ])("câu âm tính không thành lệnh huỷ: %s", (cau) => {
+      expect(phanTichLenhDonHang(cau)?.type ?? "").not.toBe("order_cancel");
+      expect(phanTichLenhNhanh(cau)?.type ?? "").not.toBe("order_cancel");
+    });
+
+    test("câu huỷ trong nhóm không /ops vẫn là lệnh; câu âm tính thì không", () => {
+      expect(laYeuCauVanHanh({ chat: { id: 1 }, text: "huỷ đơn 12" }, bot)).toBe(true);
+      expect(laYeuCauVanHanh({ chat: { id: 1 }, text: "khách muốn huỷ đơn 12 không ạ?" }, bot)).toBe(false);
+    });
+
+    test("bản nháp đơn đã thu tiền: nhấn mạnh hoàn tiền + không hoàn tác, nút rõ nghĩa", async () => {
+      (fetchJson as jest.Mock).mockResolvedValue({ orders: [{ ...don(12, ORDER_ID), payment_status: "da_thanh_toan", customer: { name: "Nguyễn Văn A", phone: "0912345678" } }] });
+      await xuLyYeuCauVanHanh(bot, "tenant-1", tin("huỷ đơn 12"));
+      const luu = sqlCalls.find((c) => /INSERT INTO telegram_operator_action/.test(c.sql))!;
+      expect(luu.params[4]).toBe("order_cancel");
+      expect(String((fetchJson as jest.Mock).mock.calls[0][0])).toContain("/ai/orders-operator?display_id=12");
+      const m = gui.mock.calls[0][1];
+      expect(m.text).toContain("Huỷ đơn #12?");
+      expect(m.text).toContain("Nguyễn Văn A");
+      expect(m.text).toContain("1.250.000đ");
+      expect(m.text).toContain("Khách ĐÃ chuyển 1.250.000đ");
+      expect(m.text).toContain("TỰ chuyển khoản trả lại khách — hệ thống chỉ ghi sổ, không tự trả tiền");
+      expect(m.text).toContain("Khách KHÔNG được báo tự động");
+      expect(m.text).toContain("• 2 × Penfolds Bin 389");
+      expect(m.text).toContain("09xx***678");
+      expect(m.text).not.toContain("0912345678");
+      expect(m.text).not.toMatch(/sẽ HOÀN TIỀN|Đã hoàn/);
+      expect(m.text).toContain("không hoàn tác được");
+      expect(m.text).not.toContain(ORDER_ID);
+      const nut = JSON.stringify(m.reply_markup);
+      expect(nut).toContain("ops_ok_");
+      expect(nut).toContain("ops_no_");
+      expect(nut).toContain("Xác nhận HUỶ ĐƠN");
+    });
+
+    test.each([
+      ["cho_chuyen_khoan", "kiểm tra khách đã chuyển tiền chưa; nếu rồi thì phải tự chuyển trả"], ["cod", "chưa thu tiền"], [null, "kiểm tra khách đã chuyển tiền chưa; nếu rồi thì phải tự chuyển trả"],
+    ])("bản nháp đơn %s không hứa hoàn tiền", async (tt, mong) => {
+      (fetchJson as jest.Mock).mockResolvedValue({ orders: [{ ...don(12, ORDER_ID), payment_status: tt }] });
+      await xuLyYeuCauVanHanh(bot, "tenant-1", tin("huỷ đơn 12"));
+      const t = gui.mock.calls[0][1].text;
+      expect(t).toContain(mong);
+      expect(t).not.toMatch(/sẽ HOÀN TIỀN|tự hoàn/);
+      expect(t).toContain("Khách KHÔNG được báo tự động");
+    });
+
+    test.each([
+      ["completed", "đã được duyệt (đã xuất kho), bot không huỷ được. Nếu khách trả hàng, anh/chị báo quản lý."],
+      ["canceled", "đã được huỷ rồi"],
+      ["archived", "hiện không huỷ được"],
+    ])("đơn %s: báo lỗi, không tạo bản nháp", async (st, mong) => {
+      (fetchJson as jest.Mock).mockResolvedValue({ orders: [don(12, ORDER_ID, st)] });
+      await expect(xuLyYeuCauVanHanh(bot, "tenant-1", tin("huỷ đơn 12"))).rejects.toThrow(mong);
+      expect(sqlCalls.some((c) => /INSERT/.test(c.sql))).toBe(false);
+    });
+
+    test("không có đơn khớp chính xác: không tạo bản nháp", async () => {
+      (fetchJson as jest.Mock).mockResolvedValue({ orders: [don(112)] });
+      await expect(xuLyYeuCauVanHanh(bot, "tenant-1", tin("huỷ đơn 12"))).rejects.toThrow("Không tìm thấy đơn số 12");
+      expect(sqlCalls.some((c) => /INSERT/.test(c.sql))).toBe(false);
+    });
+
+    test("gửi lại bản nháp huỷ cũ thì gia hạn, không tạo thêm", async () => {
+      const cu = "99999999-2222-3333-4444-555555555555";
+      (fetchJson as jest.Mock).mockResolvedValue({ orders: [don(12, ORDER_ID)] });
+      (runInTenantContext as jest.Mock).mockImplementation(async (_t: string, fn: any) => fn({
+        query: async (sql: string, params: any[] = []) => {
+          sqlCalls.push({ sql, params });
+          if (/SELECT id FROM telegram_operator_action/.test(sql)) return { rows: [{ id: cu }] };
+          return { rows: [], rowCount: 1 };
+        },
+      }));
+      await xuLyYeuCauVanHanh(bot, "tenant-1", tin("huỷ đơn 12"));
+      expect(sqlCalls.find((c) => /SET expires_at/.test(c.sql))?.params).toEqual([cu, "tenant-1"]);
+      expect(sqlCalls.some((c) => /INSERT/.test(c.sql))).toBe(false);
+      expect(sqlCalls.find((c) => /SELECT id FROM/.test(c.sql))!.sql).toContain("'order_cancel'");
+    });
+
+    test("nút Huỷ đơn trong chi tiết đơn: chỉ pending, đặt cuối", async () => {
+      const lay = async (st: string, id: number) => {
+        gui.mockClear();
+        (fetchJson as jest.Mock).mockResolvedValue({ orders: [{ ...don(12, ORDER_ID, st), payment_status: "cho_chuyen_khoan" }] });
+        await xuLyYeuCauVanHanh(bot, "tenant-1", { ...tin("xem đơn 12"), message_id: id });
+        return gui.mock.calls[0][1].reply_markup?.inline_keyboard?.flat().map((n: any) => n.callback_data) ?? [];
+      };
+      expect(await lay("pending", 31)).toEqual(["ops_ord_12", "ops_pay_12", "ops_cxl_12"]);
+      expect(await lay("completed", 32)).not.toContain("ops_cxl_12");
+      expect(await lay("canceled", 33)).not.toContain("ops_cxl_12");
+    });
+
+    test("bấm ops_cxl_N ra bản nháp (chưa huỷ gì)", async () => {
+      (fetchJson as jest.Mock).mockResolvedValue({ orders: [don(12, ORDER_ID)] });
+      await xuLyCallbackVanHanh(bot, "tenant-1", { id: "cc", data: "ops_cxl_12", from: { id: 9 }, message: { chat: { id: 7 } } });
+      expect(gui.mock.calls[0][1].text).toContain("Huỷ đơn #12?");
+      expect(fetchCoTimeout).not.toHaveBeenCalled();
+    });
+
+    test("lưới gợi ý: chỉ khi câu bắt đầu bằng huỷ đơn hoặc chat riêng; phủ định thì im", () => {
+      const k = (c: string, rieng = false) => (goiYDonHang(c, rieng) as any)?.reply_markup?.inline_keyboard?.flat().map((n: any) => n.callback_data) ?? [];
+      expect(k("huỷ đơn 12 giùm em nha chị ơi ok", false)).toEqual(["ops_cxl_12"]);
+      expect(k("đơn 12 huỷ giúp em", true)).toEqual(["ops_cxl_12"]);
+      expect(k("đơn 12 huỷ giúp em", false)).toEqual([]);
+      expect(k("khách muốn huỷ đơn 12 không ạ", true)).toEqual([]);
+      expect(k("đừng huỷ đơn 12", true)).toEqual([]);
+      expect(k("đơn 12 bị huỷ rồi", true)).toEqual([]);
+      expect(k("huỷ đơn 12 và 13", false)).toEqual([]);
+      expect(k("huỷ đơn 12 và đơn 13", false)).toEqual(["ops_cxl_12", "ops_cxl_13"]);
+      expect(k("huỷ đơn 500k", true)).toEqual([]);
+      expect(k("huỷ đơn 12 chai", true)).toEqual([]);
+      expect(k("huỷ đơn 1.250", true)).toEqual([]);
+      expect(k("huỷ đơn 1234567", true)).toEqual([]);
+      expect(k("huỷ đơn 12?", false)).toEqual([]);
+    });
+
+    test("LLM không có tool huỷ đơn; LLM lỡ trả order_cancel cũng bị bỏ qua", async () => {
+      (goiDeepSeekCoTool as jest.Mock).mockResolvedValue({ tool_calls: [{ function: { name: "order_cancel", arguments: JSON.stringify({ order_number: 12 }) } }] });
+      await expect(xuLyYeuCauVanHanh(bot, "tenant-1", tin("/ops bỏ luôn cái đơn 12 đó em"))).rejects.toThrow("chưa hiểu");
+      const tools = (goiDeepSeekCoTool as jest.Mock).mock.calls[0][1] as any[];
+      expect(tools.map((t) => t.function.name)).not.toContain("order_cancel");
+      expect(sqlCalls.some((c) => /INSERT/.test(c.sql))).toBe(false);
+    });
+
+    test("cổng tiếp quản khách: câu lệnh ghi về đơn bị nhận diện, câu thường thì không", () => {
+      for (const c of ["huỷ đơn 12", "duyệt đơn 12", "đã nhận tiền đơn 12", "duyệt đơn 12, 13"]) expect(laLenhGhiDonHang(c)).toBe(true);
+      for (const c of ["xem đơn 12", "đơn mới", "dạ em huỷ đơn 12 cho anh rồi nhé", "chào anh, em gửi hàng hôm nay"]) expect(laLenhGhiDonHang(c)).toBe(false);
+    });
+
+    test("chỉ người tạo mới xác nhận được lệnh huỷ", async () => {
+      executingRow = null;
+      (runInTenantContext as jest.Mock).mockImplementation(async (_t: string, fn: any) => fn({
+        query: async (sql: string, params: any[] = []) => {
+          sqlCalls.push({ sql, params });
+          if (/SET status='executing'/.test(sql)) return { rows: [], rowCount: 0 };
+          if (/requested_by <> \$4/.test(sql)) return { rows: [{ "?column?": 1 }], rowCount: 1 };
+          return { rows: [], rowCount: 1 };
+        },
+      }));
+      await xuLyCallbackVanHanh(bot, "tenant-1", { id: "cx2", data: `ops_ok_${UUID}`, from: { id: 99 }, message: { chat: { id: 7 } } });
+      const claim = sqlCalls.find((c) => /SET status='executing'/.test(c.sql))!;
+      expect(claim.sql).toContain("action_type <> 'order_cancel' OR requested_by = $1");
+      const { answerCallbackQuery } = jest.requireMock("./services/telegram");
+      expect(answerCallbackQuery.mock.calls.some((c: any[]) => c[2] === "Chỉ người tạo lệnh huỷ mới xác nhận được.")).toBe(true);
+      expect(fetchCoTimeout).not.toHaveBeenCalled();
+    });
+
+    const xacNhan = async (resp: any, payload: any = { order_id: ORDER_ID, display_id: 12, total_vnd: 1250000, payment_status: "da_thanh_toan" }) => {
+      executingRow = { action_type: "order_cancel", payload };
+      (fetchCoTimeout as jest.Mock).mockReset();
+      if (resp instanceof Error) (fetchCoTimeout as jest.Mock).mockRejectedValue(resp); else (fetchCoTimeout as jest.Mock).mockResolvedValue(resp);
+      gui.mockClear();
+      await xuLyCallbackVanHanh(bot, "tenant-1", { id: "cx", data: `ops_ok_${UUID}`, from: { id: 9 }, message: { chat: { id: 7 } } });
+      return gui.mock.calls[0][1];
+    };
+
+    test("xác nhận gọi đúng endpoint/body; đã thu thì nhắc TỰ chuyển trả, không nói đã hoàn", async () => {
+      const m = await xacNhan({ ok: true, status: 200, json: async () => ({ ok: true, mode: "cancel_refund" }) });
+      const [url, init] = (fetchCoTimeout as jest.Mock).mock.calls[0];
+      expect(String(url)).toBe("http://medusa.test/ai/refund-order");
+      const body = JSON.parse(init.body);
+      expect(body.orderId).toBe(ORDER_ID);
+      expect(body.partial).toBeUndefined();
+      expect(body.refundAmount).toBeUndefined();
+      expect(m.text).toContain("✅ Đã huỷ đơn #12.\n⚠️ Nhớ chuyển trả 1.250.000đ cho khách và nhắn khách biết.");
+      expect(m.text).not.toContain("Đã hoàn");
+    });
+
+    test("backend mới: dùng paid_amount và needs_manual_refund; already; không cần trả", async () => {
+      const m = await xacNhan({ ok: true, status: 200, json: async () => ({ ok: true, mode: "cancel", paid_amount: 900000, needs_manual_refund: true }) });
+      expect(m.text).toContain("Nhớ chuyển trả 900.000đ cho khách");
+      const m2 = await xacNhan({ ok: true, status: 200, json: async () => ({ ok: true, mode: "cancel", already: true }) });
+      expect(m2.text).toContain("Đơn #12 đã được huỷ rồi.");
+      const m3 = await xacNhan({ ok: true, status: 200, json: async () => ({ ok: true, mode: "cancel", paid_amount: 0, needs_manual_refund: false }) });
+      expect(m3.text).toContain("✅ Đã huỷ đơn #12.");
+      expect(m3.text).not.toContain("chuyển trả");
+      expect(m3.text).toContain("Khách không được báo tự động");
+    });
+
+    test("đơn chưa thu tiền (backend cũ): không nhắc chuyển trả", async () => {
+      const m = await xacNhan({ ok: true, status: 200, json: async () => ({ ok: true }) }, { order_id: ORDER_ID, display_id: 12, total_vnd: 1250000, payment_status: "cod" });
+      expect(m.text).toContain("✅ Đã huỷ đơn #12.");
+      expect(m.text).not.toContain("chuyển trả");
+    });
+
+    test.each([
+      [404, "order_not_found", "Không tìm thấy đơn số 12"], [409, "order_completed", "đã được duyệt (đã xuất kho) nên bot không huỷ được; cần làm trả hàng"],
+      [409, "has_fulfillment", "cần làm trả hàng, anh/chị báo quản lý"], [409, "order_status_invalid", "hiện không huỷ được"],
+      [409, "in_progress", "đang được xử lý"], [500, "lock_error", "hệ thống đang lỗi"], [500, "internal_error", "hệ thống đang lỗi"],
+      [401, "unauthorized", "Bot chưa kết nối được hệ thống bán hàng"],
+    ])("lỗi %s code %s map theo code", async (status, code, mong) => {
+      const m = await xacNhan({ ok: false, status, json: async () => ({ error: "Cannot cancel order with fulfillment order_01XYZ", code }) });
+      expect(m.text).toContain(mong);
+      expect(m.text).not.toMatch(/order_01|fulfillment|HTTP/);
+    });
+
+    test.each([
+      [401, "Bot chưa kết nối được hệ thống bán hàng"], [404, "Không tìm thấy đơn số 12"], [400, "thiếu thông tin đơn"],
+      [500, "Chưa huỷ được đơn #12"], [502, "Chưa huỷ được đơn #12"],
+    ])("backend cũ không có code: lỗi HTTP %s map theo status", async (status, mong) => {
+      const m = await xacNhan({ ok: false, status, json: async () => ({ error: "Cannot cancel order with fulfillment order_01XYZ", goi_y: "create-return" }) });
+      expect(m.text).toContain(mong);
+      expect(m.text).not.toMatch(/order_01|fulfillment|create-return|HTTP/);
+    });
+
+    test("lỗi mạng / body không phải JSON: nói chưa rõ, hướng dẫn gõ lại", async () => {
+      const m = await xacNhan(new Error("ECONNRESET"));
+      expect(m.text).toContain("Chưa rõ đơn #12 đã huỷ chưa");
+      const m2 = await xacNhan({ ok: false, status: 502, json: async () => { throw new Error("x"); } });
+      expect(m2.text).toContain("Chưa huỷ được đơn #12");
     });
   });
 
