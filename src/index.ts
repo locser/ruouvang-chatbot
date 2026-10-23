@@ -1425,7 +1425,7 @@ app.post("/v1/tg/webhook/:tenant_id", async (req: Request, res: Response) => {
     }
 
     // 2. Nhân viên gõ tin nhắn trả lời khách ngay trong Telegram (F-14)
-    if (message && (message.text || message.caption || message.photo?.length)) {
+    if (message && (message.text || message.caption || message.photo?.length || message.document)) {
       const chatId = message.chat.id;
       const text = String(message.text || message.caption || "").trim();
       const operatorId = String(message.from?.id || "");

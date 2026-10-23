@@ -8,9 +8,10 @@ import { layCaiDat } from "./caiDat";
 import { fetchCoTimeout, fetchJson, TIMEOUT } from "./http";
 import { env } from "../config/env";
 import { randomInt } from "crypto";
+import { draftKnowledgeIngest, confirmKnowledgeIngest } from "./telegramKnowledge";
 
 type LoaiLenh = "inventory_adjust" | "create_product" | "inventory_lookup" | "order_list_pending" | "order_complete" | "order_lookup" | "order_payment_received" | "order_cancel" | "revenue_report"
-  | "discount_create" | "product_hide" | "product_show" | "product_price" | "price_update" | "forward_to_customer";
+  | "discount_create" | "product_hide" | "product_show" | "product_price" | "price_update" | "forward_to_customer" | "kb_ingest";
 
 export interface LenhVanHanh {
   type: LoaiLenh;
@@ -56,6 +57,7 @@ interface TelegramMessageLike {
   text?: string;
   caption?: string;
   photo?: Array<{ file_id: string; file_size?: number; width?: number; height?: number }>;
+  document?: { file_id: string; file_name?: string; file_size?: number; mime_type?: string };
   reply_to_message?: { from?: { username?: string; is_bot?: boolean } };
 }
 
@@ -699,7 +701,7 @@ export function laYeuCauVanHanhRoRang(message: TelegramMessageLike, bot: BotShop
   const lenh = /^\s*\/ops(?:@\w+)?(?:\s|$)/i.test(text);
   // Ảnh từ nhân viên là yêu cầu vận hành (luồng cũ chưa xử lý ảnh), nhưng vẫn
   // chỉ lập bản nháp và bắt buộc xác nhận trước khi ghi.
-  return lenh || duocNhac || traLoiBot || Boolean(message.photo?.length);
+  return lenh || duocNhac || traLoiBot || Boolean(message.photo?.length) || Boolean(message.document);
 }
 
 export function laYeuCauVanHanh(message: TelegramMessageLike, bot: BotShop): boolean {
@@ -986,7 +988,7 @@ export function chonDonTheoSo(orders: DonChoDuyet[], soDon: number): DonChoDuyet
   return orders.find((o) => Number(o.display_id) === soDon) ?? null;
 }
 
-async function taoAction(tenantId: string, chatId: string, messageId: string | null, operatorId: string, type: LoaiLenh,
+export async function taoAction(tenantId: string, chatId: string, messageId: string | null, operatorId: string, type: LoaiLenh,
   status: "awaiting_selection" | "awaiting_confirmation", payload: Record<string, unknown>, originalText: string): Promise<{ id: string; created: boolean }> {
   return runInTenantContext(tenantId, async (client) => {
     const r = await client.query(
@@ -1007,7 +1009,7 @@ async function taoAction(tenantId: string, chatId: string, messageId: string | n
   });
 }
 
-function nutXacNhan(id: string, type?: LoaiLenh) {
+export function nutXacNhan(id: string, type?: LoaiLenh) {
   if (type === "order_cancel") {
     return { inline_keyboard: [[
       { text: "⚠️ Xác nhận HUỶ ĐƠN", callback_data: `ops_ok_${id}` },
@@ -1590,6 +1592,11 @@ export async function xuLyYeuCauVanHanh(bot: BotShop, tenantId: string, message:
   const messageId = message.message_id == null ? null : String(message.message_id);
   const operatorId = String(message.from?.id || "");
   let text = boTienTo(String(message.text ?? message.caption ?? ""));
+  if (message.document) {
+    // File từ nhân viên: lập bản nháp nạp vào kiến thức của bot (chưa ghi gì cho đến khi bấm Xác nhận).
+    await draftKnowledgeIngest(bot, tenantId, message);
+    return;
+  }
   if (/^(help|tro giup|trợ giúp)?$/i.test(text) && !message.photo?.length) {
     await guiTinQuaBot(bot, { chat_id: chatId, parse_mode: "HTML", text:
       "🤖 <b>Trợ lý vận hành</b>\n\n" +
@@ -1605,7 +1612,8 @@ export async function xuLyYeuCauVanHanh(bot: BotShop, tenantId: string, message:
       "• <code>đổi giá Penfolds Bin 389 thành 1.250.000</code>: đổi giá bán\n" +
       "• <code>doanh thu hôm nay</code>, <code>doanh thu 7 ngày</code>: xem doanh thu\n" +
       "• <code>xem đơn 12</code>, <code>tra đơn chị Lan</code>, <code>đơn của 0912345678</code>: xem thông tin đơn\n" +
-      "• Gửi ảnh nhãn chai kèm chú thích <code>/ops mới nhập thêm 30 chai</code>\n\n" +
+      "• Gửi ảnh nhãn chai kèm chú thích <code>/ops mới nhập thêm 30 chai</code>\n" +
+      "• Gửi file PDF, DOCX, TXT, MD, CSV, XLSX (tối đa 20 MB): bot đọc thử rồi hỏi xác nhận trước khi học\n\n" +
       "Bot luôn yêu cầu bấm xác nhận trước khi ghi dữ liệu." });
     return;
   }
@@ -2141,6 +2149,10 @@ export async function xuLyCallbackVanHanh(bot: BotShop, tenantId: string, callba
   }
 
   await answerCallbackQuery(bot, callback.id, "Đang thực hiện…");
+  if (action.action_type === "kb_ingest") {
+    await confirmKnowledgeIngest(bot, tenantId, action, chatId);
+    return true;
+  }
   try {
     const result = await thucThi(tenantId, action);
     await runInTenantContext(tenantId, (client) => client.query(
