@@ -207,7 +207,7 @@ CREATE TABLE telegram_operator_action (
   telegram_message_id   text,
   requested_by          text NOT NULL,
   confirmed_by          text,
-  action_type           text NOT NULL CHECK (action_type IN ('inventory_adjust', 'create_product', 'inventory_lookup', 'order_list_pending', 'order_complete')),
+  action_type           text NOT NULL CHECK (action_type IN ('inventory_adjust', 'create_product', 'inventory_lookup', 'order_list_pending', 'order_complete', 'order_payment_received')),
   status                text NOT NULL DEFAULT 'awaiting_confirmation'
                         CHECK (status IN ('awaiting_selection', 'awaiting_confirmation', 'executing', 'completed', 'cancelled', 'failed', 'expired')),
   payload               jsonb NOT NULL DEFAULT '{}'::jsonb,

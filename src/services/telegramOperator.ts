@@ -8,7 +8,7 @@ import { layCaiDat } from "./caiDat";
 import { fetchCoTimeout, fetchJson, TIMEOUT } from "./http";
 import { env } from "../config/env";
 
-type LoaiLenh = "inventory_adjust" | "create_product" | "inventory_lookup" | "order_list_pending" | "order_complete" | "order_lookup";
+type LoaiLenh = "inventory_adjust" | "create_product" | "inventory_lookup" | "order_list_pending" | "order_complete" | "order_lookup" | "order_payment_received" | "revenue_report";
 
 export interface LenhVanHanh {
   type: LoaiLenh;
@@ -25,6 +25,10 @@ export interface LenhVanHanh {
   /** Tra đơn: theo SĐT hoặc theo tên khách (chỉ đọc). */
   lookup_kind?: "phone" | "name";
   lookup_text?: string;
+  /** Báo cáo doanh thu: số ngày gần nhất. */
+  report_days?: number;
+  /** Mốc lịch theo giờ VN do backend tính: hôm nay / tuần này / tháng này. */
+  report_period?: "today" | "this_week" | "this_month";
 }
 
 interface TelegramMessageLike {
@@ -47,6 +51,8 @@ interface TelegramCallbackLike {
 const UUID_RE = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const CALLBACK_DON_RE = /^ops_ord_(\d{1,9})$/;
 const CALLBACK_LIST = "ops_list";
+const CALLBACK_PAY_RE = /^ops_pay_(\d{1,9})$/;
+const CALLBACK_REPORT_RE = /^ops_rep_(1|7|30|today|this_week|this_month)$/;
 const CALLBACK_XEM_RE = /^ops_view_(\d{1,9})$/;
 const CALLBACK_RE = new RegExp(`^ops_(ok|no|pick)_(${UUID_RE})(?:_(\\d+))?$`, "i");
 
@@ -84,6 +90,9 @@ export function phanTichLenhDonHang(raw: string): LenhVanHanh | null {
   if (!text || text.length > 80) return null;
   const plain = boDau(text).replace(/[?!.,;:\s]+$/g, "").trim();
 
+  const khac = phanTichNhanTienVaBaoCao(plain);
+  if (khac) return khac;
+
   // Mọi mẫu đều NEO đầu và cuối câu: nhân viên nhắn khách ("Em xác nhận đơn 12
   // cho anh rồi nhé", "đơn 3 chai vang đỏ") thì không khớp.
   const dem = "(?:(?:vui long|nho|hay|ok|da|vang|giup em|giup minh|cho em|cho minh)\\s+)*";
@@ -118,6 +127,45 @@ export function phanTichLenhDonHang(raw: string): LenhVanHanh | null {
     return { type: "order_list_pending" };
   }
   return phanTichTraDon(text, plain, raw);
+}
+
+/** Nhận tiền chuyển khoản ("đã nhận tiền đơn 12", "đơn 12 đã ck") và báo cáo doanh thu ("doanh thu 7 ngày"): neo cả câu. */
+function phanTichNhanTienVaBaoCao(plain: string): LenhVanHanh | null {
+  const dem = "(?:(?:vui long|nho|hay|xac nhan|ghi nhan|da|vang|giup em|giup minh|cho em|cho minh)\\s+)*";
+  const duoi = "(?:\\s+(?:nhe|nha|ne|di|ngay|a|voi|luon|giup|gium|dum|em|minh|anh|chi))*";
+  const xong = "(?:\\s+(?:roi|xong))?";
+  const so = "(?:so\\s*|ma\\s*)?(?:#\\s*|cw\\s*)?(\\d{1,9})";
+  const don = "don(?:\\s+hang)?";
+  const tien = [
+    `^${dem}(?:da\\s+)?(?:nhan|thu)(?:\\s+duoc)?\\s+tien(?:\\s+chuyen\\s+khoan)?(?:\\s+cua)?\\s+${don}\\s*${so}${xong}${duoi}$`,
+    `^${don}\\s*${so}\\s+(?:da\\s+)?(?:chuyen\\s+khoan|ck|thanh\\s+toan|tra\\s+tien)${xong}${duoi}$`,
+    // Bắt buộc có "đơn", # hoặc CW trước số: "khách 500 chuyển rồi" là số tiền, không phải số đơn.
+    `^khach\\s+(?:${don}\\s*(?:so\\s*|ma\\s*)?(?:#\\s*|cw\\s*)?|#\\s*|cw\\s*)(\\d{1,9})\\s+(?:da\\s+)?(?:chuyen(?:\\s+khoan)?|ck)${xong}${duoi}$`,
+  ];
+  for (const re of tien) {
+    const m = plain.match(new RegExp(re));
+    if (m) {
+      const n = Number(m[1]);
+      if (Number.isSafeInteger(n) && n > 0) return { type: "order_payment_received", order_number: n };
+    }
+  }
+  const duoiBc = "(?:\\s+(?:nhe|nha|ne|di|ngay|voi|luon))*";
+  const bc = plain.match(new RegExp(
+    `^(?:(?:cho\\s+)?(?:em\\s+)?(?:xem|vui long|nho|hay)\\s+)*(bao\\s+cao(?:\\s+(?:doanh\\s+thu|doanh\\s+so))?|doanh\\s+thu|doanh\\s+so)` +
+    `(?:\\s+(?:trong\\s+|cua\\s+|vong\\s+)?(hom\\s+nay|tuan\\s+nay|thang\\s+nay|tuan\\s+qua|thang\\s+qua|(\\d{1,3})\\s+ngay(?:\\s+(?:qua|gan\\s+nhat))?))?${duoiBc}$`));
+  if (bc) {
+    const k = bc[2] ?? "";
+    // "báo cáo" trơ trọi hay kèm tên người là lời nói thường, phải có doanh thu/doanh số hoặc khoảng thời gian.
+    if (!/doanh/.test(bc[1]) && !k) return null;
+    if (/hom nay/.test(k)) return { type: "revenue_report", report_period: "today" };
+    if (/tuan nay/.test(k)) return { type: "revenue_report", report_period: "this_week" };
+    if (/thang nay/.test(k)) return { type: "revenue_report", report_period: "this_month" };
+    let days = 7;
+    if (/thang/.test(k)) days = 30;
+    else if (bc[3]) days = Number(bc[3]);
+    if (days >= 1 && days <= 365) return { type: "revenue_report", report_days: days };
+  }
+  return null;
 }
 
 /** "xem đơn 12", "đơn 12 sao rồi", "tra đơn chị Lan", "đơn của 0912345678": chỉ đọc, không bao giờ ra bản nháp duyệt. */
@@ -184,6 +232,14 @@ function phanTichTraDon(text: string, plain: string, raw: string): LenhVanHanh |
   return null;
 }
 
+function nutBaoCao() {
+  return [
+    { text: "Hôm nay", callback_data: "ops_rep_today" },
+    { text: "Tuần này", callback_data: "ops_rep_this_week" },
+    { text: "Tháng này", callback_data: "ops_rep_this_month" },
+  ];
+}
+
 /**
  * Lưới gợi ý khi nhân viên gõ câu về đơn mà parser không hiểu: không đoán, chỉ
  * đưa nút để mở bản nháp (vẫn phải bấm Xác nhận). Chat nhóm thì chỉ gợi ý khi
@@ -195,6 +251,19 @@ export function goiYDonHang(raw: string, laChatRieng: boolean): { text: string; 
   const plain = boDau(text);
   const coDon = /\bdon\b|#|\bcw\s*\d/.test(plain);
   const so = Array.from(new Set((plain.match(/\d{1,9}/g) ?? []).map(Number))).filter((n) => n > 0).slice(0, 5);
+  // Số đơn cho lệnh ghi tiền: chỉ số đứng ngay sau "đơn / đơn số / # / CW", bỏ số tiền (500k, 2 triệu) và dãy số dài (SĐT).
+  const soDon = Array.from(new Set(Array.from(plain.matchAll(/(?:\bdon(?:\s+hang)?(?:\s*so)?\s*|#\s*|\bcw\s*)(\d{1,8})(?!\d)(?![a-z])(?!\s*(?:tr|trieu|nghin|ngan|dong)\b)/g)).map((m) => Number(m[1])))).filter((n) => n > 0);
+  const batDauXacNhanTien = /^(?:(?:da|xac nhan)\s+)*(?:(?:ghi\s+)?nhan\s+(?:duoc\s+)?tien|ck|chuyen\s+khoan)\b/.test(plain);
+  if (soDon.length === 1 && /\b(?:nhan\s+tien|chuyen\s+khoan|ck)\b/.test(plain) &&
+    !/\b(?:khong|dung|chua|huy|roi)\b/.test(plain) && (laChatRieng || batDauXacNhanTien)) {
+    return {
+      text: `Anh/chị muốn ghi nhận đã nhận tiền đơn #${soDon[0]} phải không?`,
+      reply_markup: { inline_keyboard: [[{ text: `💰 Đã nhận tiền đơn #${soDon[0]}`, callback_data: `ops_pay_${soDon[0]}` }]] },
+    };
+  }
+  if (/\b(?:doanh\s+thu|doanh\s+so)\b/.test(plain) || (laChatRieng && /\bbao\s+cao\b/.test(plain))) {
+    return { text: "Anh/chị muốn xem doanh thu trong bao lâu?", reply_markup: { inline_keyboard: [nutBaoCao()] } };
+  }
   if (coDon && so.length && !/\b(?:duyet|xac nhan|hoan thanh)\b/.test(plain) &&
     /\b(?:xem|tra|tra cuu|kiem tra|check)\b/.test(plain) && !/\b(?:khong|dung|chua|huy|roi)\b/.test(plain)) {
     return {
@@ -217,7 +286,7 @@ export function goiYDonHang(raw: string, laChatRieng: boolean): { text: string; 
     };
   }
   if (laChatRieng && /\bdon\b/.test(plain)) {
-    return { text: "Anh/chị gõ “đơn mới” để xem đơn chờ duyệt, hoặc “duyệt đơn 12”." };
+    return { text: "Anh/chị gõ “đơn mới” để xem đơn chờ duyệt, “duyệt đơn 12”, “đã nhận tiền đơn 12” hoặc “doanh thu 7 ngày”." };
   }
   return null;
 }
@@ -360,6 +429,24 @@ const OPERATOR_TOOLS = [
       } },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "order_payment_received",
+      description: "Ghi nhận ĐÃ NHẬN TIỀN CHUYỂN KHOẢN cho một đơn theo số đơn ('đã nhận tiền đơn 12', 'đơn 12 đã chuyển khoản').",
+      parameters: { type: "object", additionalProperties: false, properties: { order_number: { type: "integer", minimum: 1 } }, required: ["order_number"] },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "revenue_report",
+      description: "Báo cáo doanh thu (chỉ đọc). 'hôm nay' = period today, 'tuần này' = this_week, 'tháng này' = this_month; 'N ngày' = days.",
+      parameters: { type: "object", additionalProperties: false, properties: {
+        period: { type: "string", enum: ["today", "this_week", "this_month"] }, days: { type: "integer", minimum: 1, maximum: 365 },
+      } },
+    },
+  },
 ] as const;
 
 async function phanTichBangAi(text: string): Promise<LenhVanHanh | null> {
@@ -373,7 +460,7 @@ async function phanTichBangAi(text: string): Promise<LenhVanHanh | null> {
   ];
   const kq = await goiDeepSeekCoTool(messages, OPERATOR_TOOLS as unknown as object[]);
   const call = kq.tool_calls?.[0];
-  if (!call || !["inventory_adjust", "inventory_lookup", "create_product", "order_list_pending", "order_complete", "order_lookup"].includes(call.function.name)) return null;
+  if (!call || !["inventory_adjust", "inventory_lookup", "create_product", "order_list_pending", "order_complete", "order_lookup", "order_payment_received", "revenue_report"].includes(call.function.name)) return null;
   try {
     const p = JSON.parse(call.function.arguments || "{}");
     if (call.function.name === "order_complete") {
@@ -382,6 +469,15 @@ async function phanTichBangAi(text: string): Promise<LenhVanHanh | null> {
       return { type: "order_complete", order_number: n };
     }
     if (call.function.name === "order_list_pending") return { type: "order_list_pending" };
+    if (call.function.name === "order_payment_received") {
+      const n = Number(p.order_number);
+      return Number.isSafeInteger(n) && n > 0 ? { type: "order_payment_received", order_number: n } : null;
+    }
+    if (call.function.name === "revenue_report") {
+      if (["today", "this_week", "this_month"].includes(p.period)) return { type: "revenue_report", report_period: p.period };
+      const d = Number(p.days);
+      return { type: "revenue_report", report_days: Number.isInteger(d) && d >= 1 && d <= 365 ? d : 7 };
+    }
     if (call.function.name === "order_lookup") {
       const n = Number(p.order_number);
       if (Number.isSafeInteger(n) && n > 0) return { type: "order_lookup", order_number: n };
@@ -448,14 +544,14 @@ async function goiBackend(cfg: MedusaConfig, path: string, body: Record<string, 
   }, 15_000);
 }
 
-async function docBackend(cfg: MedusaConfig, path: string): Promise<any> {
+async function docBackend(cfg: MedusaConfig, path: string, loi = "Em chưa lấy được danh sách đơn lúc này. Anh/chị thử lại sau ít phút giúp em nhé."): Promise<any> {
   try {
     return await fetchJson(new URL(path, cfg.baseUrl).toString(), {
       headers: { "x-ai-secret-key": env.AI_SECRET_KEY },
     }, 15_000);
   } catch (e) {
     console.error("[telegram-operator] đọc backend lỗi:", e);
-    throw new LoiThanThien("Em chưa lấy được danh sách đơn lúc này. Anh/chị thử lại sau ít phút giúp em nhé.");
+    throw new LoiThanThien(loi);
   }
 }
 
@@ -529,6 +625,8 @@ async function guiBanNhap(bot: BotShop, chatId: string, id: string, type: LoaiLe
     const mon = (Array.isArray(payload.items) ? payload.items : []).slice(0, 10)
       .map((it: any) => `• ${html(it.quantity)} × ${html(it.title)}`).join("\n");
     text = `🧾 <b>Duyệt đơn #${html(payload.display_id)}?</b>\n👤 ${html(payload.customer_name || "Khách lẻ")}\n${mon}\n💰 Tổng: <b>${dinhDangTien(payload.total_vnd)}</b>${dongTien(payload.payment_status) ? `\n${dongTien(payload.payment_status)}` : ""}\n\nDuyệt xong kho sẽ được trừ. Bấm Xác nhận để duyệt nhé.`;
+  } else if (type === "order_payment_received") {
+    text = `💰 <b>Xác nhận đã nhận tiền chuyển khoản đơn #${html(payload.display_id)}?</b>\nKhách: ${html(payload.customer_name || "Khách lẻ")}\nSố tiền: <b>${dinhDangTien(payload.total_vnd)}</b>\n\nAnh/chị kiểm tra tài khoản ngân hàng đã có tiền rồi hãy bấm Xác nhận.`;
   } else if (type === "inventory_lookup") {
     text = `🔎 Tra tồn kho <b>${html(payload.title)}</b> — SKU <code>${html(payload.sku)}</code>?`;
   } else {
@@ -536,7 +634,11 @@ async function guiBanNhap(bot: BotShop, chatId: string, id: string, type: LoaiLe
       (payload.price_vnd != null ? `\nGiá: ${Number(payload.price_vnd).toLocaleString("vi-VN")}đ` : "\nGiá: chưa nhập") +
       (payload.initial_quantity != null ? `\nTồn đầu: ${html(payload.initial_quantity)}` : "\nTồn đầu: 0");
   }
-  await guiTinQuaBot(bot, { chat_id: chatId, text, parse_mode: "HTML", reply_markup: nutXacNhan(id) });
+  const markup: any = nutXacNhan(id);
+  if (type === "order_complete" && payload.payment_status === "cho_chuyen_khoan") {
+    markup.inline_keyboard.push([{ text: "💰 Đã nhận tiền", callback_data: `ops_pay_${payload.display_id}` }]);
+  }
+  await guiTinQuaBot(bot, { chat_id: chatId, text, parse_mode: "HTML", reply_markup: markup });
 }
 
 async function lapActionSanPham(bot: BotShop, tenantId: string, chatId: string, operatorId: string,
@@ -568,6 +670,15 @@ async function lapActionSanPham(bot: BotShop, tenantId: string, chatId: string, 
   });
 }
 
+/** Gửi lại bản nháp cũ thì cho thêm 15 phút, để bản nháp không hết hạn ngay sau khi vừa được nhắc lại. */
+async function giaHanBanNhap(client: { query: (sql: string, params?: any[]) => Promise<any> }, tenantId: string, id: string): Promise<void> {
+  await client.query(
+    `UPDATE telegram_operator_action SET expires_at = now() + interval '15 minutes'
+      WHERE id=$1 AND tenant_id=$2 AND status='awaiting_confirmation'`,
+    [id, tenantId]
+  );
+}
+
 async function lapBanNhapDonHang(bot: BotShop, tenantId: string, chatId: string, operatorId: string,
   messageId: string | null, soDon: number, originalText: string): Promise<void> {
   const cfg = await layMedusa(tenantId);
@@ -594,7 +705,9 @@ async function lapBanNhapDonHang(bot: BotShop, tenantId: string, chatId: string,
         ORDER BY created_at DESC LIMIT 1`,
       [tenantId, chatId, don.id]
     );
-    return r.rows[0]?.id ? String(r.rows[0].id) : null;
+    const id = r.rows[0]?.id ? String(r.rows[0].id) : null;
+    if (id) await giaHanBanNhap(client, tenantId, id);
+    return id;
   });
   if (cu) {
     await guiBanNhap(bot, chatId, cu, "order_complete", payload);
@@ -635,9 +748,12 @@ async function guiMotDon(bot: BotShop, chatId: string, o: DonChoDuyet): Promise<
     chat_id: chatId,
     parse_mode: "HTML",
     text: chiTietDon(o),
-    reply_markup: o.status === "pending"
-      ? { inline_keyboard: [[{ text: "✅ Duyệt đơn này", callback_data: `ops_ord_${o.display_id}` }]] }
-      : undefined,
+    reply_markup: (() => {
+      const hang: Array<Array<{ text: string; callback_data: string }>> = [];
+      if (o.status === "pending") hang.push([{ text: "✅ Duyệt đơn này", callback_data: `ops_ord_${o.display_id}` }]);
+      if (o.payment_status === "cho_chuyen_khoan" && o.status !== "canceled") hang.push([{ text: "💰 Đã nhận tiền", callback_data: `ops_pay_${o.display_id}` }]);
+      return hang.length ? { inline_keyboard: hang } : undefined;
+    })(),
   });
 }
 
@@ -680,6 +796,74 @@ async function traDonTheoNguoi(bot: BotShop, tenantId: string, chatId: string, k
   });
 }
 
+async function lapBanNhapNhanTien(bot: BotShop, tenantId: string, chatId: string, operatorId: string,
+  messageId: string | null, soDon: number, originalText: string): Promise<void> {
+  const cfg = await layMedusa(tenantId);
+  const don = chonDonTheoSo(await layDon(cfg, { display_id: String(soDon) }), soDon);
+  if (!don) throw new LoiThanThien(`Không tìm thấy đơn số ${soDon}. Anh/chị kiểm tra lại số đơn giúp em nhé.`);
+  if (don.status === "canceled") throw new LoiThanThien(`Đơn #${soDon} đã bị huỷ nên không ghi nhận tiền được.`);
+  if (don.payment_status === "cod") throw new LoiThanThien(`Đơn #${soDon} là đơn thu tiền khi giao (COD), không cần xác nhận chuyển khoản.`);
+  if (don.payment_status === "da_thanh_toan") throw new LoiThanThien(`Đơn #${soDon} đã ghi nhận tiền rồi, không cần làm gì thêm.`);
+  if (don.payment_status !== "cho_chuyen_khoan") throw new LoiThanThien(`Đơn #${soDon} chưa rõ hình thức thanh toán, anh/chị kiểm tra trong trang quản trị giúp em.`);
+  const payload = {
+    order_id: don.id,
+    display_id: don.display_id,
+    order_status: don.status,
+    customer_name: don.customer?.name || "Khách lẻ",
+    total_vnd: don.total_vnd,
+    payment_status: don.payment_status ?? null,
+  };
+  const cu = await runInTenantContext(tenantId, async (client) => {
+    const r = await client.query(
+      `SELECT id FROM telegram_operator_action
+        WHERE tenant_id=$1 AND telegram_chat_id=$2 AND action_type='order_payment_received'
+          AND status='awaiting_confirmation' AND expires_at > now() AND payload->>'order_id'=$3
+        ORDER BY created_at DESC LIMIT 1`,
+      [tenantId, chatId, don.id]
+    );
+    const id = r.rows[0]?.id ? String(r.rows[0].id) : null;
+    if (id) await giaHanBanNhap(client, tenantId, id);
+    return id;
+  });
+  if (cu) {
+    await guiBanNhap(bot, chatId, cu, "order_payment_received", payload);
+    return;
+  }
+  const action = await taoAction(tenantId, chatId, messageId, operatorId, "order_payment_received", "awaiting_confirmation", payload, originalText);
+  if (action.created) await guiBanNhap(bot, chatId, action.id, "order_payment_received", payload);
+}
+
+const NHAN_KY_BAO_CAO: Record<string, string> = {
+  today: "Hôm nay (từ 0h)", this_week: "Tuần này (từ thứ Hai)", this_month: "Tháng này (từ ngày 1)",
+};
+
+async function guiBaoCaoDoanhThu(bot: BotShop, tenantId: string, chatId: string, ky: { period?: string; days?: number }): Promise<void> {
+  const cfg = await layMedusa(tenantId);
+  const query = ky.period ? `period=${ky.period}` : `days=${ky.days ?? 7}`;
+  const r = await docBackend(cfg, `/ai/report/revenue?${query}`, "Em chưa lấy được số liệu doanh thu lúc này. Anh/chị thử lại sau ít phút giúp em nhé.");
+  const vnd = !r?.currency || String(r.currency).toUpperCase() === "VND";
+  const tien = (n: unknown) => (vnd ? dinhDangTien(n) : `${Math.round(Number(n) || 0)} ${html(r.currency)}`);
+  const top = (Array.isArray(r?.top_products) ? r.top_products : []).slice(0, 5)
+    .map((t: any, i: number) => `${i + 1}. ${html(t.name)} · ${html(t.qty)}`).join("\n");
+  const soDon = Number(r?.order_count) || 0;
+  // Backend cũ bỏ qua `period` và trả theo số ngày: không gắn nhãn mốc lịch sai.
+  const dungMoc = Boolean(ky.period) && r?.period === ky.period;
+  const nhan = dungMoc ? NHAN_KY_BAO_CAO[ky.period!] : `${Number(r?.period_days) || ky.days || 7} ngày gần nhất`;
+  const choDuyet = Number(r?.pending_count) || 0;
+  const huy = Number(r?.canceled_count) || 0;
+  const tu = dungMoc ? dinhDangNgayVN(r?.from) : "";
+  const text = `📊 <b>Doanh thu ${html(nhan)}</b>\n\n` +
+    (soDon === 0 ? "Chưa có đơn nào trong khoảng này." :
+      `💰 Tổng giá trị đơn: <b>${tien(r.revenue_all)}</b> (${soDon} đơn)\n` +
+      `✅ Đã thu tiền: <b>${tien(r.revenue_paid)}</b> (${Number(r.paid_order_count) || 0} đơn)\n` +
+      `🧮 Trung bình mỗi đơn: ${tien(r.avg_order_value)}` +
+      (choDuyet > 0 ? `\n🕒 Chờ duyệt: ${choDuyet} đơn${r.revenue_pending != null ? ` · ${tien(r.revenue_pending)}` : ""}` : "") +
+      (top ? `\n\n🏆 <b>Bán chạy</b>\n${top}` : "")) +
+    (huy > 0 ? `\n❌ Đơn huỷ: ${huy} (không tính)` : "") +
+    `\n\n<i>${tu ? `Tính từ ${tu} đến bây giờ.` : `Tính theo ${Number(r?.period_days) || ky.days || 7} ngày gần nhất kể từ lúc này.`}</i>`;
+  await guiTinQuaBot(bot, { chat_id: chatId, parse_mode: "HTML", text, reply_markup: { inline_keyboard: [nutBaoCao()] } });
+}
+
 async function guiDanhSachDonChoDuyet(bot: BotShop, tenantId: string, chatId: string): Promise<void> {
   const cfg = await layMedusa(tenantId);
   const ds = await layDon(cfg, { status: "pending", limit: "11", order: "asc" });
@@ -712,6 +896,8 @@ export async function xuLyYeuCauVanHanh(bot: BotShop, tenantId: string, message:
       "• <code>/ops tạo sản phẩm mới ... giá 1200000</code>\n" +
       "• <code>đơn mới</code> hoặc <code>có đơn nào chưa duyệt</code>: xem đơn chờ duyệt\n" +
       "• <code>duyệt đơn 12</code>: duyệt đơn số 12\n" +
+      "• <code>đã nhận tiền đơn 12</code>: ghi nhận khách đã chuyển khoản\n" +
+      "• <code>doanh thu hôm nay</code>, <code>doanh thu 7 ngày</code>: xem doanh thu\n" +
       "• <code>xem đơn 12</code>, <code>tra đơn chị Lan</code>, <code>đơn của 0912345678</code>: xem thông tin đơn\n" +
       "• Gửi ảnh nhãn chai kèm chú thích <code>/ops mới nhập thêm 30 chai</code>\n\n" +
       "Bot luôn yêu cầu bấm xác nhận trước khi ghi dữ liệu." });
@@ -732,6 +918,16 @@ export async function xuLyYeuCauVanHanh(bot: BotShop, tenantId: string, message:
     : (phanTichLenhNhanh(text) ?? await phanTichBangAi(text));
   if (!lenh) throw new LoiThanThien("Mình chưa hiểu thao tác. Hãy ghi rõ tên chai và số lượng, ví dụ: /ops Chateau X mới nhập thêm 30 chai. Muốn xem đơn, gõ “đơn mới”.");
 
+  if (lenh.type === "order_payment_received") {
+    const n = Number(lenh.order_number);
+    if (!Number.isSafeInteger(n) || n <= 0) throw new LoiThanThien("Anh/chị cho em xin số đơn nhé, ví dụ: đã nhận tiền đơn 12.");
+    await lapBanNhapNhanTien(bot, tenantId, chatId, operatorId, messageId, n, text);
+    return;
+  }
+  if (lenh.type === "revenue_report") {
+    await guiBaoCaoDoanhThu(bot, tenantId, chatId, lenh.report_period ? { period: lenh.report_period } : { days: Number(lenh.report_days) || 7 });
+    return;
+  }
   if (lenh.type === "order_lookup") {
     if (lenh.order_number) await traDonTheoSo(bot, tenantId, chatId, Number(lenh.order_number));
     else if (lenh.lookup_kind && lenh.lookup_text) await traDonTheoNguoi(bot, tenantId, chatId, lenh.lookup_kind, lenh.lookup_text);
@@ -782,8 +978,45 @@ export function canhBaoDeHieu(ds: unknown): string[] {
     if (/Không capture được payment/i.test(t)) kq.add("⚠️ Chưa thu được tiền của đơn trong hệ thống, anh/chị kiểm tra phần thanh toán trong trang quản trị nhé.");
     else if (/Không lưu được mã vận đơn/i.test(t)) kq.add("⚠️ Chưa lưu được mã vận đơn, anh/chị kiểm tra trong trang quản trị nhé.");
     else if (/chưa có payment/i.test(t)) kq.add("ℹ️ Đơn này chưa có khoản thanh toán nào trong hệ thống.");
+    else if (/không có giao dịch thanh toán/i.test(t)) kq.add("ℹ️ Đơn này không có giao dịch thanh toán trong hệ thống, em chỉ ghi nhận là đã nhận tiền.");
   }
   return Array.from(kq);
+}
+
+/** Gọi /ai/order-payment-received; lỗi map theo `code` của backend, không đọc câu chữ. */
+async function ghiNhanTienBackend(cfg: MedusaConfig, p: any): Promise<any> {
+  const so = p.display_id;
+  const lai = `gõ lại “đã nhận tiền đơn ${so}”`;
+  let res: Response;
+  try {
+    res = await fetchCoTimeout(new URL("/ai/order-payment-received", cfg.baseUrl).toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-ai-secret-key": env.AI_SECRET_KEY },
+      body: JSON.stringify({ order_id: p.order_id }),
+    }, 60_000);
+  } catch (e) {
+    console.error("[telegram-operator] order-payment-received lỗi mạng:", e);
+    throw new LoiThanThien(`Chưa rõ đơn #${so} đã ghi nhận tiền chưa. Anh/chị ${lai} để kiểm tra nhé.`);
+  }
+  const body: any = await res.json().catch(() => ({}));
+  if (res.ok) return body;
+  const code = String(body?.code || "");
+  if (res.status === 401 || code === "unauthorized") {
+    throw new LoiThanThien("Bot chưa kết nối được hệ thống bán hàng, anh/chị báo người quản trị giúp em.");
+  }
+  console.error(`[telegram-operator] order-payment-received ${res.status} code=${code}`);
+  switch (code) {
+    case "order_is_cod": throw new LoiThanThien(`Đơn #${so} là đơn thu tiền khi giao (COD), không cần xác nhận chuyển khoản.`);
+    case "order_canceled": throw new LoiThanThien(`Đơn #${so} đã bị huỷ nên không ghi nhận tiền được.`);
+    case "order_not_found": throw new LoiThanThien(`Không tìm thấy đơn số ${so}. Anh/chị kiểm tra lại số đơn giúp em nhé.`);
+    case "order_status_invalid":
+    case "order_payment_state_invalid":
+      throw new LoiThanThien(`Đơn #${so} hiện chưa ghi nhận tiền được. Anh/chị kiểm tra đơn trong trang quản trị giúp em nhé.`);
+    case "in_progress": throw new LoiThanThien(`Đơn #${so} đang được xử lý. Anh/chị đợi vài giây rồi ${lai} nhé.`);
+    case "capture_failed": throw new LoiThanThien(`Chưa ghi nhận được tiền của đơn #${so} vì hệ thống chưa ghi được khoản thu. Anh/chị thử lại sau ít phút, hoặc kiểm tra trong trang quản trị nhé.`);
+    case "metadata_update_failed": throw new LoiThanThien(`Chưa cập nhật xong trạng thái tiền của đơn #${so}. Anh/chị ${lai} để hệ thống làm tiếp nhé.`);
+    default: throw new LoiThanThien(`Chưa rõ đơn #${so} đã ghi nhận tiền chưa. Anh/chị ${lai} để kiểm tra nhé.`);
+  }
 }
 
 /** Gọi /ai/order-complete và đổi mọi lỗi thành lời nhắn dễ hiểu. */
@@ -804,6 +1037,7 @@ async function duyetDonBackend(cfg: MedusaConfig, p: any): Promise<any> {
   if (res.ok) return body;
   const loi = String(body?.error || "");
   console.error(`[telegram-operator] order-complete ${res.status}: ${loi.slice(0, 300)}`);
+  if (res.status === 401) throw new LoiThanThien("Bot chưa kết nối được hệ thống bán hàng, anh/chị báo người quản trị giúp em.");
   if (res.status === 409) {
     throw new LoiThanThien(`Đơn #${so} đang được xử lý. Anh/chị đợi vài giây rồi gõ lại “duyệt đơn ${so}” nhé.`);
   }
@@ -829,6 +1063,7 @@ async function thucThi(tenantId: string, action: any): Promise<any> {
     return goiBackend(cfg, "/ai/products-lookup", { skus: [p.sku] });
   }
   if (action.action_type === "order_complete") return duyetDonBackend(cfg, p);
+  if (action.action_type === "order_payment_received") return ghiNhanTienBackend(cfg, p);
   return goiBackend(cfg, "/ai/create-product", {
     product: { title: p.title, description: p.description, sku: p.sku, price_vnd: p.price_vnd },
     initial_quantity: Number(p.initial_quantity || 0),
@@ -844,6 +1079,23 @@ export async function xuLyCallbackVanHanh(bot: BotShop, tenantId: string, callba
     } catch (e: any) {
       if (!(e instanceof LoiThanThien)) console.error("[telegram-operator] lấy danh sách đơn lỗi:", e);
       await guiTinQuaBot(bot, { chat_id: chat, text: `⚠️ ${html(e instanceof LoiThanThien ? e.message : "Em chưa lấy được danh sách đơn. Anh/chị thử lại sau ít phút giúp em nhé.")}`, parse_mode: "HTML" });
+    }
+    return true;
+  }
+  const khopTien = String(callback.data || "").match(CALLBACK_PAY_RE);
+  const khopBc = String(callback.data || "").match(CALLBACK_REPORT_RE);
+  if (khopTien || khopBc) {
+    const chat = String(callback.message?.chat?.id || "");
+    await answerCallbackQuery(bot, callback.id, khopTien ? "Đang mở đơn…" : "Đang tính doanh thu…");
+    try {
+      if (khopTien) await lapBanNhapNhanTien(bot, tenantId, chat, String(callback.from?.id || ""), `cb:${callback.id}`, Number(khopTien[1]), callback.data || "");
+      else {
+        const k = khopBc![1];
+        await guiBaoCaoDoanhThu(bot, tenantId, chat, /^\d+$/.test(k) ? { days: Number(k) } : { period: k });
+      }
+    } catch (e: any) {
+      if (!(e instanceof LoiThanThien)) console.error("[telegram-operator] nút tiền/báo cáo lỗi:", e);
+      await guiTinQuaBot(bot, { chat_id: chat, text: `⚠️ ${html(e instanceof LoiThanThien ? e.message : "Em chưa làm được việc này. Anh/chị thử lại sau ít phút giúp em nhé.")}`, parse_mode: "HTML" });
     }
     return true;
   }
@@ -952,6 +1204,16 @@ export async function xuLyCallbackVanHanh(bot: BotShop, tenantId: string, callba
       const item = result?.items?.[0];
       text = item ? `📦 <b>${html(item.title)}</b> (<code>${html(item.sku)}</code>) còn <b>${html(item.stock_qty)}</b>.` : "Không tìm thấy SKU trong kho thật.";
     }
+    let replyMarkup: any = undefined;
+    if (action.action_type === "order_payment_received") {
+      text = result?.already
+        ? `ℹ️ Đơn #${html(p.display_id)} đã ghi nhận tiền trước đó rồi.`
+        : `✅ Đã ghi nhận tiền đơn #${html(p.display_id)}.` + canhBaoDeHieu(result?.canh_bao).map((c) => `\n${html(c)}`).join("");
+      if (p.order_status === "pending") {
+        text += "\nĐơn này còn chờ duyệt, anh/chị bấm nút bên dưới nếu muốn duyệt luôn.";
+        replyMarkup = { inline_keyboard: [[{ text: "✅ Duyệt đơn này", callback_data: `ops_ord_${p.display_id}` }]] };
+      }
+    }
     if (action.action_type === "order_complete") {
       text = result?.da_xu_ly_truoc_do
         ? `ℹ️ Đơn #${html(p.display_id)} đã được duyệt trước đó rồi.`
@@ -964,15 +1226,15 @@ export async function xuLyCallbackVanHanh(bot: BotShop, tenantId: string, callba
         (Number(p.initial_quantity) && tonThanhCong ? ` với tồn đầu ${html(p.initial_quantity)}` : "") + "." +
         (!tonThanhCong ? `\n⚠️ Sản phẩm đã tạo nhưng chưa ghi được tồn đầu: ${html(result?.inventory?.warning || "lỗi không xác định")}` : "");
     }
-    await guiTinQuaBot(bot, { chat_id: chatId, text, parse_mode: "HTML" });
+    await guiTinQuaBot(bot, { chat_id: chatId, text, parse_mode: "HTML", reply_markup: replyMarkup });
   } catch (e: any) {
     const loi = String(e?.message || e).slice(0, 1000);
     await runInTenantContext(tenantId, (client) => client.query(
       `UPDATE telegram_operator_action SET status='failed', error=$1 WHERE id=$2 AND tenant_id=$3`,
       [loi, id, tenantId]
     ));
-    const thanThien = action.action_type === "order_complete"
-      ? (e instanceof LoiThanThien ? e.message : `Chưa duyệt được đơn #${action.payload?.display_id ?? ""}. Anh/chị thử lại sau ít phút giúp em nhé.`)
+    const thanThien = action.action_type === "order_complete" || action.action_type === "order_payment_received"
+      ? (e instanceof LoiThanThien ? e.message : `Chưa ${action.action_type === "order_complete" ? "duyệt được" : "ghi nhận được tiền của"} đơn #${action.payload?.display_id ?? ""}. Anh/chị thử lại sau ít phút giúp em nhé.`)
       : `Không thực hiện được: ${loi}`;
     await guiTinQuaBot(bot, { chat_id: chatId, text: `❌ ${html(thanThien)}`, parse_mode: "HTML" });
   }

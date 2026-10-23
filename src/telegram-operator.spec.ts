@@ -256,7 +256,7 @@ describe("Telegram operator: đơn hàng", () => {
     [500, { error: "Đơn hàng đã bị huỷ — không thể duyệt hoàn thành." }, "đã bị huỷ"],
     [500, { error: "Insufficient inventory for item variant_01ABC", buoc_da_xong: { created_fulfillment: false } }, "kho chưa bị trừ"],
     [502, "<html>bad gateway</html>", "Chưa rõ đơn #12 đã duyệt xong chưa"],
-    [401, { error: "Unauthorized" }, "Chưa rõ đơn #12 đã duyệt xong chưa"],
+    [401, { error: "Unauthorized" }, "Bot chưa kết nối được hệ thống bán hàng"],
     [500, { error: "boom" }, "Chưa rõ đơn #12 đã duyệt xong chưa"],
     [500, { error: "boom", buoc_da_xong: { created_fulfillment: true } }, "Kho đã trừ nhưng đơn #12 chưa đóng"],
   ])("lỗi backend %s thành lời nhắn dễ hiểu", async (status, body, mongDoi) => {
@@ -486,6 +486,254 @@ describe("Telegram operator: đơn hàng", () => {
       const fs = require("fs");
       const src: string = fs.readFileSync(require("path").join(__dirname, "index.ts"), "utf8");
       expect(src).toMatch(/startsWith\("ops_"\)\) \{\s*if \(!\(await laNhanVienCuaShop/);
+    });
+  });
+
+  describe("đã nhận tiền (ghi)", () => {
+    test.each([
+      "đã nhận tiền đơn 12", "da nhan tien don 12", "nhận tiền đơn CW12", "đơn 12 đã chuyển khoản", "don 12 da chuyen khoan",
+      "khách đơn 12 chuyển rồi", "khach #12 chuyen roi", "khách đơn 12 ck rồi", "nhận tiền đơn 12 rồi", "xác nhận đã nhận tiền đơn #12", "đơn 12 ck rồi", "đã nhận tiền đơn 12 nhé",
+    ])("hiểu câu nhận tiền: %s", (cau) => {
+      expect(phanTichLenhDonHang(cau)).toEqual({ type: "order_payment_received", order_number: 12 });
+      expect(laYeuCauVanHanh({ chat: { id: 1 }, text: cau }, bot)).toBe(true);
+    });
+
+    test.each([
+      "đơn 12 chưa chuyển khoản", "không nhận tiền đơn 12", "khách bảo mai chuyển khoản đơn 12", "đã nhận tiền của khách hôm qua",
+      "chuyển khoản vào số tài khoản nào ạ", "khách 500 chuyển rồi", "khách 2 triệu chuyển rồi", "khách 12 chuyển rồi", "Em đã nhận tiền đơn 12 từ khách rồi nhé anh",
+    ])("câu âm tính không thành lệnh nhận tiền: %s", (cau) => {
+      expect(phanTichLenhDonHang(cau)?.type ?? "").not.toBe("order_payment_received");
+    });
+
+    test("gợi ý nút nhận tiền: chỉ lấy số ngay sau đơn/#/CW", () => {
+      const g2: any = goiYDonHang("ghi nhận tiền chuyển khoản đơn 12 hộ em cái", false);
+      expect(g2.reply_markup.inline_keyboard[0][0].callback_data).toBe("ops_pay_12");
+      const k = (c: string, rieng = false) => (goiYDonHang(c, rieng) as any)?.reply_markup?.inline_keyboard?.flat().map((n: any) => n.callback_data) ?? [];
+      expect(k("nhận tiền chuyển khoản 500k cho đơn 12", true)).toEqual(["ops_pay_12"]);
+      expect(k("khách chuyển khoản 500k cho đơn 12", true)).toEqual(["ops_pay_12"]);
+      expect(k("khách 0912345678 chuyển khoản", true)).toEqual([]);
+      expect(k("đơn 12 2 chai đã ck", true)).toEqual(["ops_pay_12"]); // "2 chai" không phải số đơn
+      expect(k("đơn 12 2 chai đã ck", false)).toEqual([]); // nhóm: không bắt đầu bằng động từ xác nhận
+      expect(k("đã ck đơn 12 2 chai", false)).toEqual(["ops_pay_12"]);
+      expect(k("khách chuyển khoản 2 triệu cho đơn 12", true)).toEqual(["ops_pay_12"]);
+      expect(k("đơn 12 và đơn 13 chuyển khoản", true)).toEqual([]);
+      expect(k("khách chuyển khoản 500 cho đơn", true)).toEqual([]);
+    });
+
+    test("trong nhóm: câu nhắn khách không ra nút nhận tiền", () => {
+      const k = (c: string) => (goiYDonHang(c, false) as any)?.reply_markup?.inline_keyboard?.flat().map((n: any) => n.callback_data) ?? [];
+      expect(k("anh chuyển khoản cho đơn 12 giúp em nhé")).toEqual([]);
+      expect(k("khách chuyển khoản 500k cho đơn 12")).toEqual([]);
+      expect(k("nhận tiền đơn 12 hộ em cái")).toEqual(["ops_pay_12"]);
+    });
+
+    test("đơn chuyển khoản: bản nháp có tên, số tiền, lời nhắc kiểm tra ngân hàng", async () => {
+      (fetchJson as jest.Mock).mockResolvedValue({ orders: [{ ...don(12, ORDER_ID), payment_status: "cho_chuyen_khoan" }] });
+      await xuLyYeuCauVanHanh(bot, "tenant-1", tin("đã nhận tiền đơn 12"));
+      const luu = sqlCalls.find((c) => /INSERT INTO telegram_operator_action/.test(c.sql))!;
+      expect(luu.params[4]).toBe("order_payment_received");
+      const m = gui.mock.calls[0][1];
+      expect(m.text).toContain("Xác nhận đã nhận tiền chuyển khoản đơn #12?");
+      expect(m.text).toContain("Nguyễn Văn A");
+      expect(m.text).toContain("1.250.000đ");
+      expect(m.text).toContain("kiểm tra tài khoản ngân hàng đã có tiền rồi hãy bấm Xác nhận");
+      expect(m.text).not.toContain(ORDER_ID);
+      expect(JSON.stringify(m.reply_markup)).toContain("ops_ok_");
+    });
+
+    test.each([
+      ["cod", "là đơn thu tiền khi giao (COD), không cần xác nhận chuyển khoản"],
+      ["da_thanh_toan", "đã ghi nhận tiền rồi"],
+    ])("đơn %s: trả lời luôn, không tạo bản nháp", async (tt, mong) => {
+      (fetchJson as jest.Mock).mockResolvedValue({ orders: [{ ...don(12, ORDER_ID), payment_status: tt }] });
+      await expect(xuLyYeuCauVanHanh(bot, "tenant-1", tin("đã nhận tiền đơn 12"))).rejects.toThrow(mong);
+      expect(sqlCalls.some((c) => /INSERT/.test(c.sql))).toBe(false);
+    });
+
+    test("đơn chưa rõ hình thức thanh toán: không tạo bản nháp", async () => {
+      (fetchJson as jest.Mock).mockResolvedValue({ orders: [{ ...don(12, ORDER_ID), payment_status: null }] });
+      await expect(xuLyYeuCauVanHanh(bot, "tenant-1", tin("đã nhận tiền đơn 12"))).rejects.toThrow("Đơn #12 chưa rõ hình thức thanh toán, anh/chị kiểm tra trong trang quản trị giúp em.");
+      expect(sqlCalls.some((c) => /INSERT/.test(c.sql))).toBe(false);
+    });
+
+    test("gửi lại bản nháp cũ thì gia hạn thêm 15 phút (cả duyệt đơn và nhận tiền)", async () => {
+      const cu = "99999999-2222-3333-4444-555555555555";
+      for (const [cau, tt] of [["duyệt đơn 12", "cod"], ["đã nhận tiền đơn 12", "cho_chuyen_khoan"]] as const) {
+        sqlCalls.length = 0;
+        (fetchJson as jest.Mock).mockResolvedValue({ orders: [{ ...don(12, ORDER_ID), payment_status: tt }] });
+        (runInTenantContext as jest.Mock).mockImplementation(async (_t: string, fn: any) => fn({
+          query: async (sql: string, params: any[] = []) => {
+            sqlCalls.push({ sql, params });
+            if (/SELECT id FROM telegram_operator_action/.test(sql)) return { rows: [{ id: cu }] };
+            return { rows: [], rowCount: 1 };
+          },
+        }));
+        await xuLyYeuCauVanHanh(bot, "tenant-1", tin(cau));
+        const up = sqlCalls.find((c) => /SET expires_at = now\(\) \+ interval '15 minutes'/.test(c.sql));
+        expect(up?.params).toEqual([cu, "tenant-1"]);
+        expect(sqlCalls.some((c) => /INSERT/.test(c.sql))).toBe(false);
+      }
+    });
+
+    test("đơn huỷ: không tạo bản nháp", async () => {
+      (fetchJson as jest.Mock).mockResolvedValue({ orders: [{ ...don(12, "o", "canceled"), payment_status: "cho_chuyen_khoan" }] });
+      await expect(xuLyYeuCauVanHanh(bot, "tenant-1", tin("đã nhận tiền đơn 12"))).rejects.toThrow("đã bị huỷ");
+    });
+
+    test("nút Đã nhận tiền chỉ hiện khi chờ chuyển khoản (chi tiết đơn và bản nháp duyệt)", async () => {
+      const lay = async (tt: any, cau: string, id: number) => {
+        gui.mockClear();
+        (fetchJson as jest.Mock).mockResolvedValue({ orders: [{ ...don(12, ORDER_ID), payment_status: tt }] });
+        await xuLyYeuCauVanHanh(bot, "tenant-1", { ...tin(cau), message_id: id });
+        return JSON.stringify(gui.mock.calls[0][1].reply_markup ?? {});
+      };
+      expect(await lay("cho_chuyen_khoan", "xem đơn 12", 21)).toContain("ops_pay_12");
+      expect(await lay("cod", "xem đơn 12", 22)).not.toContain("ops_pay_");
+      expect(await lay(null, "xem đơn 12", 23)).not.toContain("ops_pay_");
+      expect(await lay("da_thanh_toan", "xem đơn 12", 24)).not.toContain("ops_pay_");
+      expect(await lay("cho_chuyen_khoan", "duyệt đơn 12", 25)).toContain("ops_pay_12");
+      expect(await lay("cod", "duyệt đơn 12", 26)).not.toContain("ops_pay_");
+    });
+
+    test("bấm nút ops_pay_N ra bản nháp", async () => {
+      (fetchJson as jest.Mock).mockResolvedValue({ orders: [{ ...don(12, ORDER_ID), payment_status: "cho_chuyen_khoan" }] });
+      await xuLyCallbackVanHanh(bot, "tenant-1", { id: "cp", data: "ops_pay_12", from: { id: 9 }, message: { chat: { id: 7 } } });
+      expect(gui.mock.calls[0][1].text).toContain("đã nhận tiền chuyển khoản đơn #12");
+    });
+
+    const xacNhan = async (resp: any, payload: any = { order_id: ORDER_ID, display_id: 12, order_status: "pending" }) => {
+      executingRow = { action_type: "order_payment_received", payload };
+      (fetchCoTimeout as jest.Mock).mockResolvedValue(resp);
+      await xuLyCallbackVanHanh(bot, "tenant-1", { id: "cx", data: `ops_ok_${UUID}`, from: { id: 9 }, message: { chat: { id: 7 } } });
+      return gui.mock.calls[0][1];
+    };
+
+    test("xác nhận gọi đúng endpoint; thành công gợi ý duyệt khi đơn còn chờ duyệt", async () => {
+      const m = await xacNhan({ ok: true, status: 200, json: async () => ({ ok: true, already: false, display_id: 12 }) });
+      const [url, init] = (fetchCoTimeout as jest.Mock).mock.calls[0];
+      expect(String(url)).toBe("http://medusa.test/ai/order-payment-received");
+      expect(JSON.parse(init.body)).toEqual({ order_id: ORDER_ID });
+      expect(m.text).toContain("✅ Đã ghi nhận tiền đơn #12.");
+      expect(JSON.stringify(m.reply_markup)).toContain("ops_ord_12");
+    });
+
+    test("thành công khi đơn đã hoàn thành: không gợi ý duyệt; already: nói đã ghi nhận", async () => {
+      const m = await xacNhan({ ok: true, status: 200, json: async () => ({ ok: true }) }, { order_id: ORDER_ID, display_id: 12, order_status: "completed" });
+      expect(m.reply_markup).toBeUndefined();
+      gui.mockClear();
+      const m2 = await xacNhan({ ok: true, status: 200, json: async () => ({ ok: true, already: true }) });
+      expect(m2.text).toContain("đã ghi nhận tiền trước đó");
+    });
+
+    test("canh_bao được in dễ hiểu", async () => {
+      const m = await xacNhan({ ok: true, status: 200, json: async () => ({ ok: true, canh_bao: ["Không capture được payment pay_01XYZ: boom", "Đơn không có giao dịch thanh toán trong hệ thống"] }) });
+      expect(m.text).toContain("Chưa thu được tiền");
+      expect(m.text).toContain("không có giao dịch thanh toán trong hệ thống, em chỉ ghi nhận là đã nhận tiền");
+      expect(m.text).not.toMatch(/pay_01|boom/);
+    });
+
+    test.each([
+      [409, "order_is_cod", "COD"], [409, "order_canceled", "đã bị huỷ"], [404, "order_not_found", "Không tìm thấy đơn số 12"],
+      [409, "order_status_invalid", "chưa ghi nhận tiền được"], [409, "order_payment_state_invalid", "chưa ghi nhận tiền được"],
+      [409, "in_progress", "đang được xử lý"], [502, "capture_failed", "hệ thống chưa ghi được khoản thu"],
+      [500, "metadata_update_failed", "Chưa cập nhật xong trạng thái tiền"],
+      [500, "internal_error", "Chưa rõ đơn #12 đã ghi nhận tiền chưa"], [401, "unauthorized", "Bot chưa kết nối được hệ thống bán hàng"],
+      [400, "missing_order_id", "Chưa rõ đơn #12"], [500, "ma_la", "Chưa rõ đơn #12"],
+    ])("lỗi %s code %s map theo code", async (status, code, mong) => {
+      const m = await xacNhan({ ok: false, status, json: async () => ({ error: "Câu chữ bất kỳ order_01XYZ", code }) });
+      expect(m.text).toContain(mong);
+      expect(m.text).not.toMatch(/order_01|code|HTTP/);
+    });
+
+    test("body không phải JSON: câu chung", async () => {
+      const m = await xacNhan({ ok: false, status: 502, json: async () => { throw new Error("x"); } });
+      expect(m.text).toContain("Chưa rõ đơn #12 đã ghi nhận tiền chưa");
+    });
+  });
+
+  describe("báo cáo doanh thu (đọc)", () => {
+    test.each([
+      ["doanh thu hôm nay", { report_period: "today" }], ["doanh thu hom nay", { report_period: "today" }],
+      ["doanh thu tuần này", { report_period: "this_week" }], ["doanh thu tháng này", { report_period: "this_month" }],
+      ["báo cáo hôm nay", { report_period: "today" }], ["báo cáo tuần này", { report_period: "this_week" }],
+      ["doanh thu 7 ngày", { report_days: 7 }], ["doanh thu 30 ngay", { report_days: 30 }], ["xem doanh thu 14 ngày", { report_days: 14 }],
+      ["bao cao doanh thu", { report_days: 7 }], ["doanh thu", { report_days: 7 }], ["doanh số tuần qua", { report_days: 7 }],
+    ])("hiểu câu báo cáo: %s", (cau, mong) => {
+      expect(phanTichLenhDonHang(cau)).toEqual({ type: "revenue_report", ...mong });
+      expect(laYeuCauVanHanh({ chat: { id: 1 }, text: cau }, bot)).toBe(true);
+    });
+
+    test.each([
+      "báo cáo sếp là hôm nay khách đông lắm", "doanh thu tháng này em chưa tính xong", "chốt báo cáo cho anh nhé khách ơi", "doanh thu 500 ngày",
+      "báo cáo", "báo cáo nhé", "báo cáo anh", "em báo cáo chị nhé", "báo cáo sếp", "báo cáo doanh thu cho anh",
+    ])("câu âm tính không thành báo cáo: %s", (cau) => {
+      expect(phanTichLenhDonHang(cau)?.type ?? "").not.toBe("revenue_report");
+      expect(laYeuCauVanHanh({ chat: { id: 1 }, text: cau }, bot)).toBe(false);
+    });
+
+    test("lưới gợi ý báo cáo: nhóm chỉ khi có doanh thu/doanh số", () => {
+      const k = (c: string, r: boolean) => (goiYDonHang(c, r) as any)?.reply_markup?.inline_keyboard?.flat().map((n: any) => n.callback_data) ?? [];
+      expect(k("báo cáo sếp là khách đông", false)).toEqual([]);
+      expect(k("em báo cáo chị nhé", false)).toEqual([]);
+      expect(k("cho em xin cái doanh thu với", false)).toEqual(["ops_rep_today", "ops_rep_this_week", "ops_rep_this_month"]);
+      expect(k("cho em xin cái báo cáo", true)).toHaveLength(3);
+    });
+
+    const moi = {
+      ok: true, period: "today", from: "2026-10-22T17:00:00Z", to: "2026-10-23T05:00:00Z", timezone: "Asia/Ho_Chi_Minh", excludes_canceled: true,
+      period_days: null, order_count: 3, paid_order_count: 2, revenue_all: 3750000, revenue_paid: 2500000, avg_order_value: 1250000,
+      pending_count: 1, revenue_pending: 1250000, canceled_count: 2, currency: "VND", top_products: [{ name: "Penfolds Bin 389", qty: 6 }],
+    };
+
+    test.each([
+      ["doanh thu hôm nay", "today", "Hôm nay (từ 0h)"], ["doanh thu tuần này", "this_week", "Tuần này (từ thứ Hai)"],
+      ["doanh thu tháng này", "this_month", "Tháng này (từ ngày 1)"],
+    ])("%s gọi period=%s, nhãn đúng", async (cau, period, nhan) => {
+      (fetchJson as jest.Mock).mockResolvedValue({ ...moi, period });
+      await xuLyYeuCauVanHanh(bot, "tenant-1", tin(cau));
+      expect(String((fetchJson as jest.Mock).mock.calls[0][0])).toContain(`/ai/report/revenue?period=${period}`);
+      expect(gui.mock.calls[0][1].text).toContain(nhan);
+    });
+
+    test("đủ số liệu mới: chờ duyệt, đơn huỷ không tính, top, nút nhanh; không còn chú thích gồm đơn huỷ", async () => {
+      (fetchJson as jest.Mock).mockResolvedValue(moi);
+      await xuLyYeuCauVanHanh(bot, "tenant-1", tin("doanh thu hôm nay"));
+      const m = gui.mock.calls[0][1];
+      expect(m.text).toContain("3.750.000đ");
+      expect(m.text).toContain("(3 đơn)");
+      expect(m.text).toContain("2.500.000đ");
+      expect(m.text).toContain("Chờ duyệt: 1 đơn · 1.250.000đ");
+      expect(m.text).toContain("Đơn huỷ: 2 (không tính)");
+      expect(m.text).toContain("Penfolds Bin 389");
+      expect(m.text).toContain("Tính từ 23/10 00:00");
+      expect(m.text).not.toMatch(/gồm cả đơn/);
+      expect(m.reply_markup.inline_keyboard[0].map((n: any) => n.callback_data)).toEqual(["ops_rep_today", "ops_rep_this_week", "ops_rep_this_month"]);
+    });
+
+    test("N ngày gọi days=; backend cũ thiếu trường mới không vỡ và không gắn nhãn mốc lịch sai", async () => {
+      (fetchJson as jest.Mock).mockResolvedValue({ ok: true, period_days: 7, order_count: 2, paid_order_count: 1, revenue_all: 2000000, revenue_paid: 1000000, avg_order_value: 1000000, currency: "VND", top_products: [] });
+      await xuLyYeuCauVanHanh(bot, "tenant-1", tin("doanh thu 7 ngày"));
+      expect(String((fetchJson as jest.Mock).mock.calls[0][0])).toContain("days=7");
+      gui.mockClear();
+      await xuLyYeuCauVanHanh(bot, "tenant-1", { ...tin("doanh thu hôm nay"), message_id: 30 });
+      const t = gui.mock.calls[0][1].text as string;
+      expect(t).toContain("7 ngày gần nhất");
+      expect(t).not.toContain("từ 0h");
+      expect(t).not.toMatch(/Chờ duyệt|Đơn huỷ/);
+    });
+
+    test("không có đơn; nút nhanh; số lạ bị bỏ qua; lỗi backend dễ hiểu", async () => {
+      (fetchJson as jest.Mock).mockResolvedValue({ ok: true, order_count: 0, currency: "VND", top_products: [] });
+      await xuLyCallbackVanHanh(bot, "tenant-1", { id: "r1", data: "ops_rep_this_month", from: { id: 9 }, message: { chat: { id: 7 } } });
+      expect(String((fetchJson as jest.Mock).mock.calls[0][0])).toContain("period=this_month");
+      expect(gui.mock.calls[0][1].text).toContain("Chưa có đơn nào");
+      (fetchJson as jest.Mock).mockRejectedValue(new Error("HTTP 500 khi gọi http://x"));
+      gui.mockClear();
+      await xuLyCallbackVanHanh(bot, "tenant-1", { id: "r2", data: "ops_rep_7", from: { id: 9 }, message: { chat: { id: 7 } } });
+      expect(gui.mock.calls[0][1].text).toContain("số liệu doanh thu");
+      expect(gui.mock.calls[0][1].text).not.toMatch(/HTTP|http/);
+      gui.mockClear();
+      expect(await xuLyCallbackVanHanh(bot, "tenant-1", { id: "r3", data: "ops_rep_99", from: { id: 9 }, message: { chat: { id: 7 } } })).toBe(false);
     });
   });
 });
