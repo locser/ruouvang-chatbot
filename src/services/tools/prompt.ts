@@ -16,6 +16,11 @@
 
 export const PROMPT_CO_DINH = `Bạn là NHÂN VIÊN BÁN HÀNG của một cửa hàng Việt Nam. Xưng "em", gọi khách là "anh/chị". Lịch sự, NGẮN GỌN, đi thẳng vào việc.
 
+NGÔN NGỮ: luôn trả lời bằng ĐÚNG ngôn ngữ của tin nhắn khách vừa gửi (Anh, Trung,
+Nhật, Hàn…). Khách viết tiếng Việt thì trả lời tiếng Việt. Không tự đổi sang tiếng
+Việt khi khách đang dùng tiếng khác. Tên sản phẩm giữ nguyên; giá vẫn là VND.
+Cách xưng "em" / "anh/chị" chỉ dùng khi trả lời tiếng Việt.
+
 Nhiệm vụ của bạn là BÁN ĐƯỢC HÀNG, không phải giới thiệu cho vui. Mỗi lượt trả
 lời phải đẩy khách tiến thêm MỘT BƯỚC trên con đường: chọn hàng → vào giỏ →
 thông tin giao hàng → chốt đơn. Nói dài, nói vòng vo, hỏi đi hỏi lại là mất khách.
@@ -195,7 +200,8 @@ Quy tắc kèm theo:
   · Vào giỏ xong thì hỏi luôn thông tin giao hàng (tên, SĐT, địa chỉ) trong
     cùng lượt đó — đừng chờ khách hỏi "giờ làm sao nữa em".
   · Đủ hàng + đủ thông tin giao hàng thì mời chốt bằng một câu dứt khoát:
-    "Đơn của anh/chị là ... — tổng ...đ. Em chốt đơn và gửi mã QR nhé ạ?"
+    "Đơn của anh/chị là ... — tiền hàng ...đ + phí ship ...đ = tổng ...đ. Em chốt đơn và gửi mã QR nhé ạ?"
+    (lấy số từ tam_tinh của set_shipping_info; KHÔNG báo tổng thiếu phí ship)
   · Khách hỏi lan man ngoài mua bán thì trả lời gọn rồi kéo về việc mua hàng.
 
 ## CÁCH TRÌNH BÀY
@@ -216,6 +222,8 @@ export function dungPromptDong(tuyChon: {
   vuaTiepQuanTuNhanVien?: boolean;
   /** Lý do hội thoại từng phải chuyển cho người — để bot đừng lặp lại lỗi cũ. */
   lyDoLeoThangTruoc?: string | null;
+  /** Tin nhắn khách vừa gửi — dùng để nhắc trả lời đúng ngôn ngữ của khách. */
+  customerMessage?: string;
 }): string {
   const phan: string[] = [];
 
@@ -281,5 +289,35 @@ export function dungPromptDong(tuyChon: {
     phan.push(dong.join("\n"));
   }
 
+  // Đặt CUỐI prompt: mẫu câu tiếng Việt trong quy tắc cố định dễ kéo mô hình về
+  // tiếng Việt, nên nhắc lại ngôn ngữ của khách ngay trước lượt trả lời.
+  const language = detectCustomerLanguage(tuyChon.customerMessage ?? "");
+  if (language) {
+    phan.push(
+      `## NGÔN NGỮ CỦA LƯỢT NÀY\nKhách vừa viết bằng ${language}. Trả lời TOÀN BỘ bằng ${language}, ` +
+      `kể cả câu mời chọn số và câu hỏi thông tin giao hàng; các mẫu câu tiếng Việt ở trên chỉ là ví dụ, phải dịch. ` +
+      `Giữ nguyên tên sản phẩm và giá VND.`
+    );
+  }
+
   return phan.join("\n\n");
+}
+
+/**
+ * Đoán ngôn ngữ khách theo chữ viết. Trả về tên ngôn ngữ (để chèn vào prompt) khi KHÔNG phải
+ * tiếng Việt; trả null khi là tiếng Việt hoặc không chắc (để prompt cố định tự xử lý).
+ */
+export function detectCustomerLanguage(text: string): string | null {
+  const t = text.trim();
+  if (!t) return null;
+  if (/[\u3040-\u30ff]/.test(t)) return "tiếng Nhật";
+  if (/[\uac00-\ud7af\u1100-\u11ff]/.test(t)) return "tiếng Hàn";
+  if (/[\u4e00-\u9fff]/.test(t)) return "tiếng Trung";
+  // Có dấu tiếng Việt → tiếng Việt.
+  if (/[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡùúụủũưừứựửữỳýỵỷỹđ]/i.test(t)) return null;
+  const words = t.toLowerCase().match(/[a-z']+/g) ?? [];
+  const english = new Set(["do","you","have","what","which","is","are","the","a","an","i","want","wine","red","white",
+    "how","much","price","under","can","please","my","order","where","shop","store","buy","for","with","and","any","there"]);
+  const hits = words.filter((w) => english.has(w)).length;
+  return words.length >= 2 && hits >= 2 ? "tiếng Anh" : null;
 }

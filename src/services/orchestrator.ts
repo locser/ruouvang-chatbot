@@ -199,6 +199,7 @@ export async function* chayOrchestrator(
     triThuc: ts.triThuc,
     vuaTiepQuanTuNhanVien: ts.vuaTiepQuanTuNhanVien,
     lyDoLeoThangTruoc: ts.lyDoLeoThangTruoc,
+    customerMessage: ts.tinNhanKhach,
   });
 
   const lichSuSach = ts.lichSu

@@ -111,11 +111,11 @@ export const hanMucDangNhap = gioiHanTanSuat({
   thongDiep: "Bạn đã thử quá nhiều lần. Vui lòng đợi 15 phút.",
 });
 
-/** Chat theo IP khách: 15 tin / 5 phút. */
+/** Chat theo IP khách: 20 tin / 1 phút (nhiều khách dùng chung wifi vẫn chat được). */
 export const hanMucChatTheoIp = gioiHanTanSuat({
   ten: "chat_ip",
-  soLuong: 15,
-  cuaSoGiay: 5 * 60,
+  soLuong: 20,
+  cuaSoGiay: 60,
   layKhoa: layIp,
 });
 

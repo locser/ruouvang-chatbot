@@ -440,13 +440,21 @@ export async function xuLySetShippingInfo(nc: NguCanhTool, args: any): Promise<K
 
   try {
     const cartId = await damBaoCoGio(nc, medusa);
-    await medusaCartUpdateAddress(medusa, cartId, diaChi);
+    const kqDiaChi = await medusaCartUpdateAddress(medusa, cartId, diaChi);
+    const tong = kqDiaChi?.totals;
+    const coTamTinh = tong && typeof tong.total === "number" && tong.total > 0;
     return thanhCong({
       da_ghi_nhan: {
         phone: diaChi.phone ?? null,
         address: diaChi.address ?? null,
         recipient_name: diaChi.firstName ?? null,
       },
+      tam_tinh: coTamTinh
+        ? { tien_hang_vnd: tong.item_total, phi_ship_vnd: tong.shipping_total, tong_tien_vnd: tong.total }
+        : null,
+      luu_y: coTamTinh
+        ? "Khi tóm tắt đơn để khách xác nhận, PHẢI ghi đủ: tiền hàng + phí ship = tổng (lấy đúng số trong tam_tinh). Phí ship 0 thì ghi miễn phí ship."
+        : "Chưa tính được phí ship: khi tóm tắt đơn, nói rõ tổng chưa gồm phí ship và phí ship sẽ báo khi chốt đơn.",
     });
   } catch (e) {
     console.error("[Tool set_shipping_info] Lỗi:", e);
@@ -569,7 +577,12 @@ export async function xuLyCheckout(nc: NguCanhTool, args: any): Promise<KetQuaTo
       ma_don_hien_thi: kq?.order?.display_id != null ? `CW${kq.order.display_id}` : null,
       luu_y: "Khi báo mã đơn cho khách CHỈ dùng ma_don_hien_thi, tuyệt đối không đọc order_id nội bộ. Khi nói tổng tiền, tách rõ tien_hang_vnd + phi_ship_vnd = tong_tien_vnd.",
       tong_tien_vnd: kq?.order?.total ?? null,
-      tien_hang_vnd: kq?.order?.subtotal ?? null,
+      // Medusa v2: `subtotal` của đơn đã gồm phí ship; tiền hàng là `item_total`.
+      tien_hang_vnd: typeof kq?.order?.item_total === "number"
+        ? kq.order.item_total
+        : (typeof kq?.order?.total === "number" && typeof kq?.order?.shipping_total === "number"
+          ? kq.order.total - kq.order.shipping_total
+          : null),
       phi_ship_vnd: kq?.order?.shipping_total ?? null,
       qr_url: kq?.qr_url ?? kq?.vietqr_url ?? null,
     });
